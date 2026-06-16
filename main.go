@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"image/png"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -297,7 +299,7 @@ func (d *downloader) downloadTabularResource(ctx context.Context, sequenceID, ou
 	for page := 1; ; page++ {
 		req := map[string]any{
 			"sequence_id": sequenceID,
-			"page_size":   1,
+			"page_size":   pageSize,
 			"resource": map[string]any{
 				"resource_name": resourceName,
 				"method_name":   "Readings",
@@ -505,6 +507,7 @@ func main() {
 	outputDir := flag.String("output", "output", "output directory")
 	authToken := flag.String("token", os.Getenv("VIAM_AUTH_TOKEN"), "auth token (or set VIAM_AUTH_TOKEN in .env)")
 	pageSize := flag.Uint("page-size", 100, "page size for tabular data pagination")
+	ampWindow := flag.Float64("amp-window", 3000, "amplitude display window: counts below frame peak that receive colour")
 	flag.Parse()
 
 	if *sequenceID == "" {
@@ -528,7 +531,8 @@ func main() {
 
 	tabularDir := filepath.Join(*outputDir, "tabular")
 	imagesDir := filepath.Join(*outputDir, "images")
-	for _, dir := range []string{tabularDir, imagesDir} {
+	sonarImagesDir := filepath.Join(*outputDir, "sonar-images")
+	for _, dir := range []string{tabularDir, imagesDir, sonarImagesDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			log.Fatalf("mkdir %s: %v", dir, err)
 		}
@@ -546,11 +550,6 @@ func main() {
 		log.Fatalf("load progress: %v", err)
 	}
 
-	if p.tabularDone() && p.BinaryDone {
-		fmt.Printf("Already complete (%d entries in manifest). Delete %s to re-download.\n", len(m.entries), progressPath)
-		return
-	}
-
 	dl := newDownloader(conn, *authToken, m, p)
 
 	fmt.Println("Downloading tabular data...")
@@ -565,5 +564,92 @@ func main() {
 	}
 	fmt.Printf("Binary complete: %d total manifest entries\n\n", len(m.entries))
 
+	fmt.Println("Rendering sonar images...")
+	if err := renderSonarImages(tabularDir, sonarImagesDir, *ampWindow, m); err != nil {
+		log.Fatalf("render: %v", err)
+	}
+	fmt.Printf("Render complete: %d total manifest entries\n\n", len(m.entries))
+
 	fmt.Printf("Done. Manifest: %s\n", manifestPath)
+}
+
+func renderSonarImages(tabularDir, sonarImagesDir string, ampWindow float64, m *manifest) error {
+	total := 0
+	skipped := 0
+	return filepath.WalkDir(tabularDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
+			return nil
+		}
+
+		rel, err := filepath.Rel(tabularDir, path)
+		if err != nil {
+			return err
+		}
+		pngPath := filepath.Join(sonarImagesDir, strings.TrimSuffix(rel, ".json")+".png")
+
+		if _, err := os.Stat(pngPath); err == nil {
+			skipped++
+			return nil
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			log.Printf("warning: read %s: %v", path, err)
+			return nil
+		}
+
+		var dp TabularDataPoint
+		if err := json.Unmarshal(data, &dp); err != nil {
+			log.Printf("warning: parse %s: %v", path, err)
+			return nil
+		}
+
+		var payload struct {
+			Readings fanSampleGrid `json:"readings"`
+		}
+		if err := json.Unmarshal(dp.Payload, &payload); err != nil {
+			log.Printf("warning: parse payload %s: %v", path, err)
+			return nil
+		}
+		grid := &payload.Readings
+
+		if grid.NBeams == 0 || grid.NSamples == 0 {
+			log.Printf("warning: empty grid in %s, skipping", path)
+			return nil
+		}
+
+		img, err := renderFanSampleGrid(grid, 0, ampWindow)
+		if err != nil {
+			log.Printf("warning: render %s: %v", path, err)
+			return nil
+		}
+
+		if err := os.MkdirAll(filepath.Dir(pngPath), 0755); err != nil {
+			return err
+		}
+		f, err := os.Create(pngPath)
+		if err != nil {
+			return err
+		}
+		if encErr := png.Encode(f, img); encErr != nil {
+			f.Close()
+			return encErr
+		}
+		f.Close()
+
+		_ = m.add([]ManifestEntry{{
+			Type:         "sonar-image",
+			Path:         pngPath,
+			TimeCaptured: dp.TimeCaptured,
+			ResourceName: dp.ResourceName,
+		}})
+		total++
+		if total%100 == 0 {
+			fmt.Printf("  rendered %d images (%d skipped)\n", total, skipped)
+		}
+		return nil
+	})
 }
