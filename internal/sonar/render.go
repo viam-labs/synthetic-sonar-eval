@@ -16,11 +16,11 @@ const (
 
 	// dbWindow is the minimum dB display range anchored at the noise floor.
 	// Wide enough that weak echoes above noise are visible without saturation.
-	dbWindow = 60.0
+	dbWindow = 6000.0
 
 	// dbDisplayHeadroom keeps the frame peak below the colormap top so the
 	// strongest returns aren't clipped to the same colour.
-	dbDisplayHeadroom = 3.0
+	dbDisplayHeadroom = 300.0
 
 	heatmapRangeSigmaFactor = 0.5
 	heatmapArcSigmaFactor   = 0.7
