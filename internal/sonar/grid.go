@@ -1,14 +1,14 @@
-package main
+package sonar
 
 import (
 	"strconv"
 	"strings"
 )
 
-// fanSampleGrid is the wire format for sonar amplitude data. Only cells with
+// FanSampleGrid is the wire format for sonar amplitude data. Only cells with
 // amplitude strictly above the frame noise floor (MinAmp) are stored in Amps,
 // keyed by "beam_sample" (e.g. "0_76").
-type fanSampleGrid struct {
+type FanSampleGrid struct {
 	PingNumber     uint32             `json:"ping_number"`
 	Latitude       float64            `json:"latitude"`
 	Longitude      float64            `json:"longitude"`
@@ -24,7 +24,7 @@ type fanSampleGrid struct {
 	Amps           map[string]float32 `json:"amps"`
 }
 
-func parseAmpKey(key string) (beam, sample int, ok bool) {
+func ParseAmpKey(key string) (beam, sample int, ok bool) {
 	parts := strings.SplitN(key, "_", 2)
 	if len(parts) != 2 {
 		return 0, 0, false

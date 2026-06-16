@@ -1,4 +1,4 @@
-package main
+package sonar
 
 import (
 	"fmt"
@@ -8,34 +8,31 @@ import (
 )
 
 const (
-	defaultRenderSize = 1500
+	DefaultRenderSize = 1500
 
-	// heatmapRangeSigmaFactor scales the Gaussian sigma in the radial (range) direction
-	// relative to the range-cell width. Keep small (≤0.6) for tight range resolution.
+	// dbPerCount converts raw amplitude counts to dB. Adjust to match the
+	// sonar hardware's TVG scaling (e.g. 0.5 dB/count is common).
+	dbPerCount = 0.5
+
+	// dbWindow is the minimum dB display range anchored at the noise floor.
+	// Wide enough that weak echoes above noise are visible without saturation.
+	dbWindow = 60.0
+
+	// dbDisplayHeadroom keeps the frame peak below the colormap top so the
+	// strongest returns aren't clipped to the same colour.
+	dbDisplayHeadroom = 3.0
+
 	heatmapRangeSigmaFactor = 0.5
+	heatmapArcSigmaFactor   = 0.7
+	heatmapMinThreshold     = 0.01
 
-	// heatmapArcSigmaFactor scales the Gaussian sigma in the tangential (arc) direction
-	// relative to the arc-cell width. ~0.7 gives smooth beam-to-beam coverage.
-	heatmapArcSigmaFactor = 0.7
-
-	// heatmapMinThreshold is the minimum normalised heat value that receives colour.
-	// Pixels below this are left as background, avoiding faint haloes far from any echo.
-	heatmapMinThreshold = 0.01
-
-	// gaussLUTN controls the resolution of the precomputed Gaussian table.
-	// gaussLUTMax is the maximum x² value stored (exp(-9/2) ≈ 0.011 at the 3σ boundary).
 	gaussLUTN   = 4096
 	gaussLUTMax = 9.0
 
-	// cmapLUTN controls the resolution of the precomputed colormap table.
 	cmapLUTN = 4096
 )
 
-// gaussLUT[i] = exp( -(i/gaussLUTN * gaussLUTMax) / 2 )
-// Covers the Gaussian kernel evaluated at normalised squared distances 0 → gaussLUTMax.
 var gaussLUT [gaussLUTN + 1]float64
-
-// cmapLUT[i] = colormapSonarAmp(i/cmapLUTN) as a pre-encoded RGBA byte tuple.
 var cmapLUT [cmapLUTN + 1][4]byte
 
 func init() {
@@ -50,8 +47,6 @@ func init() {
 	}
 }
 
-// gaussLookup returns exp(-x2/2) using the precomputed table with linear interpolation.
-// x2 is the normalised squared polar distance rr²+ra² from the Gaussian kernel.
 func gaussLookup(x2 float64) float64 {
 	if x2 >= gaussLUTMax {
 		return 0
@@ -61,7 +56,6 @@ func gaussLookup(x2 float64) float64 {
 	return gaussLUT[i] + (idx-float64(i))*(gaussLUT[i+1]-gaussLUT[i])
 }
 
-// cmapLookup returns the colormap RGBA bytes for a normalised heat value t ∈ [0,1].
 func cmapLookup(t float64) [4]byte {
 	i := int(t * float64(cmapLUTN))
 	if i < 0 {
@@ -73,7 +67,6 @@ func cmapLookup(t float64) [4]byte {
 	return cmapLUT[i]
 }
 
-// sonarColormapStops: low=blue, mid=rainbow to bright red, high=very dark red.
 var sonarColormapStops = []struct {
 	t       float64
 	r, g, b float64
@@ -116,33 +109,39 @@ func colormapSonarAmp(t float64) color.RGBA {
 	}
 }
 
-// renderFanSampleGrid renders a sonar fan into a square RGBA image via Gaussian
-// splatting. ampDisplayWindow controls how many amplitude counts below the frame
-// peak receive colour; echoes outside that window are treated as background.
-func renderFanSampleGrid(grid *fanSampleGrid, size int, ampDisplayWindow float64) (image.Image, error) {
+// RenderFanSampleGrid renders a sonar fan into a square RGBA image via Gaussian
+// splatting. The dB display window is computed automatically: anchored at the
+// frame noise floor, at least dbWindow wide, and extended to dbDisplayHeadroom
+// above the frame peak so echoes are never saturated.
+func RenderFanSampleGrid(grid *FanSampleGrid, size int) (image.Image, error) {
 	if grid == nil {
-		return nil, fmt.Errorf("compressed fan sample grid is required")
+		return nil, fmt.Errorf("fan sample grid is required")
 	}
 	if size <= 0 {
-		size = defaultRenderSize
+		size = DefaultRenderSize
 	}
 
 	nBeams := grid.NBeams
 	nSamples := grid.NSamples
 	cosTilt := grid.CosTilt
 
-	// ── Step 1: amplitude window anchored at frame peak ─────────────────────────
-	signalPeak := float64(grid.MinAmp)
+	noiseFloor := float64(grid.MinAmp)
+	dbMin := noiseFloor * dbPerCount
+	dbMax := dbMin + dbWindow
+	signalPeakDb := dbMin
 	for _, v := range grid.Amps {
-		if amp := float64(v); amp > signalPeak {
-			signalPeak = amp
+		if db := float64(v) * dbPerCount; db > signalPeakDb {
+			signalPeakDb = db
 		}
 	}
-	ampMax := signalPeak
-	ampMin := ampMax - ampDisplayWindow
-	ampSpan := ampDisplayWindow
+	if signalPeakDb > dbMin {
+		dbMax = math.Max(dbMax, signalPeakDb+dbDisplayHeadroom)
+	}
+	dbSpan := dbMax - dbMin
+	if dbSpan < 1e-9 {
+		dbSpan = 1
+	}
 
-	// ── Step 2: polar geometry ───────────────────────────────────────────────────
 	azEdges := make([]float64, nBeams+1)
 	if nBeams > 1 {
 		daz := make([]float64, nBeams-1)
@@ -215,7 +214,6 @@ func renderFanSampleGrid(grid *fanSampleGrid, size int, ampDisplayWindow float64
 		return px, py
 	}
 
-	// ── Step 3: Gaussian splatting over sparse entries ──────────────────────────
 	type beamParams struct {
 		cosAZ, sinAZ, dazRad   float64
 		rangePerDx, rangePerDy float64
@@ -241,13 +239,12 @@ func renderFanSampleGrid(grid *fanSampleGrid, size int, ampDisplayWindow float64
 	rangeWidthM := grid.RangePerSample * cosTilt
 
 	for key, v := range grid.Amps {
-		b, s, ok := parseAmpKey(key)
+		b, s, ok := ParseAmpKey(key)
 		if !ok {
 			continue
 		}
-
-		amp := float64(v)
-		norm := (amp - ampMin) / ampSpan
+		db := float64(v) * dbPerCount
+		norm := (db - dbMin) / dbSpan
 		if norm <= 0 {
 			continue
 		}
@@ -294,8 +291,6 @@ func renderFanSampleGrid(grid *fanSampleGrid, size int, ampDisplayWindow float64
 			}
 		}
 	}
-
-	// ── Step 4: normalise and colourmap ────────────────────────────────────────
 
 	maxHeat := 0.0
 	for _, v := range heat {
