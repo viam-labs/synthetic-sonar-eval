@@ -19,20 +19,41 @@ import (
 
 func main() {
 	outputDir := flag.String("output", "output", "output directory (same as used for download)")
+	tabularDir := flag.String("tabular", "", "tabular JSON directory (default: <output>/tabular)")
 	size := flag.Int("size", 0, "image size in pixels (0 = default 1500)")
 	fps := flag.Int("fps", 3, "video frame rate")
+	paramsFile := flag.String("params", "", "optional JSON file with render params (dbPerCount, dbWindow, dbDisplayHeadroom, heatmapRangeSigmaFactor, heatmapArcSigmaFactor, heatmapMinThreshold, colorStops)")
 	flag.Parse()
 
-	tabularDir := filepath.Join(*outputDir, "tabular")
+	var renderParams *sonar.RenderParams
+	if *paramsFile != "" {
+		p := sonar.DefaultRenderParams()
+		data, err := os.ReadFile(*paramsFile)
+		if err != nil {
+			log.Fatalf("read params file: %v", err)
+		}
+		if err := json.Unmarshal(data, &p); err != nil {
+			log.Fatalf("parse params file: %v", err)
+		}
+		renderParams = &p
+	}
+
+	tabularRoot := *tabularDir
+	if tabularRoot == "" {
+		tabularRoot = filepath.Join(*outputDir, "tabular")
+	}
 	sonarImagesDir := filepath.Join(*outputDir, "sonar-images")
 	binaryImagesDir := filepath.Join(*outputDir, "images")
 
+	if err := os.RemoveAll(sonarImagesDir); err != nil {
+		log.Fatalf("clear %s: %v", sonarImagesDir, err)
+	}
 	if err := os.MkdirAll(sonarImagesDir, 0755); err != nil {
 		log.Fatalf("mkdir %s: %v", sonarImagesDir, err)
 	}
 
 	fmt.Println("Rendering sonar images...")
-	rendered, skipped, err := renderSonarImages(tabularDir, sonarImagesDir, *size)
+	rendered, skipped, err := renderSonarImages(tabularRoot, sonarImagesDir, *size, renderParams)
 	if err != nil {
 		log.Fatalf("render: %v", err)
 	}
@@ -58,7 +79,7 @@ type tabularDataPoint struct {
 	Payload      json.RawMessage `json:"payload"`
 }
 
-func renderSonarImages(tabularDir, sonarImagesDir string, size int) (rendered, skipped int, err error) {
+func renderSonarImages(tabularDir, sonarImagesDir string, size int, params *sonar.RenderParams) (rendered, skipped int, err error) {
 	walkErr := filepath.WalkDir(tabularDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -104,7 +125,7 @@ func renderSonarImages(tabularDir, sonarImagesDir string, size int) (rendered, s
 			return nil
 		}
 
-		img, err := sonar.RenderFanSampleGrid(grid, size)
+		img, err := sonar.RenderFanSampleGrid(grid, size, params)
 		if err != nil {
 			log.Printf("warning: render %s: %v", path, err)
 			return nil
@@ -192,22 +213,39 @@ func createPairedVideos(videos []string, outputDir string) error {
 
 	for _, v := range others {
 		outPath := filepath.Join(pairedDir, filepath.Base(v))
-		fmt.Printf("  screen1 + %s → %s\n", filepath.Base(v), outPath)
-		if err := makeSideBySide(screen1, v, outPath, h); err != nil {
+		useLHS := screen1UsesLHS(v)
+		side := "RHS"
+		if useLHS {
+			side = "LHS"
+		}
+		fmt.Printf("  screen1 (%s) + %s → %s\n", side, filepath.Base(v), outPath)
+		if err := makeSideBySide(screen1, v, outPath, h, useLHS); err != nil {
 			log.Printf("warning: pair %s: %v", filepath.Base(v), err)
 		}
 	}
 	return nil
 }
 
-// makeSideBySide places leftPath and rightPath side by side, both scaled to
-// the given height (even-rounded), and encodes to outputPath.
-func makeSideBySide(leftPath, rightPath, outputPath string, height int) error {
+// screen1UsesLHS reports whether a sonar video should be paired with the left
+// half of the screen1 feed. horizontal-h-sensor uses LHS; horizontal-h3-* use RHS.
+func screen1UsesLHS(sonarVideoPath string) bool {
+	base := strings.TrimSuffix(filepath.Base(sonarVideoPath), ".mp4")
+	return strings.HasPrefix(base, "horizontal-h") && !strings.HasPrefix(base, "horizontal-h3")
+}
+
+// makeSideBySide places a cropped screen1 feed and sonarPath side by side, both
+// scaled to the given height (even-rounded), and encodes to outputPath.
+// useLHS selects the left half of screen1; otherwise the right half is used.
+func makeSideBySide(screenPath, sonarPath, outputPath string, height int, useLHS bool) error {
 	h := height &^ 1 // round down to even for x264
-	filter := fmt.Sprintf("[0:v]scale=-2:%d[v0];[1:v]scale=-2:%d[v1];[v0][v1]hstack=inputs=2[v]", h, h)
+	crop := "crop=iw/2:ih:iw/2:0"
+	if useLHS {
+		crop = "crop=iw/2:ih:0:0"
+	}
+	filter := fmt.Sprintf("[0:v]%s,scale=-2:%d[v0];[1:v]scale=-2:%d[v1];[v0][v1]hstack=inputs=2[v]", crop, h, h)
 	cmd := exec.Command("ffmpeg", "-y",
-		"-i", leftPath,
-		"-i", rightPath,
+		"-i", screenPath,
+		"-i", sonarPath,
 		"-filter_complex", filter,
 		"-map", "[v]",
 		"-c:v", "libx264",

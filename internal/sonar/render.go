@@ -3,28 +3,11 @@ package sonar
 import (
 	"fmt"
 	"image"
-	"image/color"
 	"math"
 )
 
 const (
-	DefaultRenderSize = 1500
-
-	// dbPerCount converts raw amplitude counts to dB. Adjust to match the
-	// sonar hardware's TVG scaling (e.g. 0.5 dB/count is common).
-	dbPerCount = 0.5
-
-	// dbWindow is the minimum dB display range anchored at the noise floor.
-	// Wide enough that weak echoes above noise are visible without saturation.
-	dbWindow = 6000.0
-
-	// dbDisplayHeadroom keeps the frame peak below the colormap top so the
-	// strongest returns aren't clipped to the same colour.
-	dbDisplayHeadroom = 300.0
-
-	heatmapRangeSigmaFactor = 0.5
-	heatmapArcSigmaFactor   = 0.7
-	heatmapMinThreshold     = 0.01
+	DefaultRenderSize = 1024
 
 	gaussLUTN   = 4096
 	gaussLUTMax = 9.0
@@ -32,18 +15,56 @@ const (
 	cmapLUTN = 4096
 )
 
+// ColorStop is a single point in a colormap gradient (t in [0,1], r/g/b in [0,255]).
+type ColorStop struct {
+	T float64 `json:"t"`
+	R float64 `json:"r"`
+	G float64 `json:"g"`
+	B float64 `json:"b"`
+}
+
+// RenderParams controls the visual output of RenderFanSampleGrid.
+// Use DefaultRenderParams to get a fully populated value, then override as needed.
+type RenderParams struct {
+	DBPerCount              float64     `json:"dbPerCount"`
+	DBWindow                float64     `json:"dbWindow"`
+	DBDisplayHeadroom       float64     `json:"dbDisplayHeadroom"`
+	HeatmapRangeSigmaFactor float64     `json:"heatmapRangeSigmaFactor"`
+	HeatmapArcSigmaFactor   float64     `json:"heatmapArcSigmaFactor"`
+	HeatmapMinThreshold     float64     `json:"heatmapMinThreshold"`
+	ColorStops              []ColorStop `json:"colorStops"`
+}
+
+// DefaultRenderParams returns the default rendering parameters.
+func DefaultRenderParams() RenderParams {
+	return RenderParams{
+		DBPerCount:              0.5,
+		DBWindow:                6000.0,
+		DBDisplayHeadroom:       300.0,
+		HeatmapRangeSigmaFactor: 0.5,
+		HeatmapArcSigmaFactor:   0.7,
+		HeatmapMinThreshold:     0.01,
+		ColorStops: []ColorStop{
+			{0.00, 2, 0, 127},
+			{0.12, 0, 200, 255},
+			{0.18, 0, 255, 64},
+			{0.24, 255, 255, 0},
+			{0.32, 255, 128, 0},
+			{0.40, 255, 0, 0},
+			{0.55, 255, 0, 0},
+			{0.70, 140, 0, 0},
+			{0.85, 55, 0, 0},
+			{1.00, 18, 0, 0},
+		},
+	}
+}
+
 var gaussLUT [gaussLUTN + 1]float64
-var cmapLUT [cmapLUTN + 1][4]byte
 
 func init() {
 	for i := 0; i <= gaussLUTN; i++ {
 		u := float64(i) / float64(gaussLUTN) * gaussLUTMax
 		gaussLUT[i] = math.Exp(-u / 2)
-	}
-	for i := 0; i <= cmapLUTN; i++ {
-		t := float64(i) / float64(cmapLUTN)
-		c := colormapSonarAmp(t)
-		cmapLUT[i] = [4]byte{c.R, c.G, c.B, c.A}
 	}
 }
 
@@ -56,64 +77,48 @@ func gaussLookup(x2 float64) float64 {
 	return gaussLUT[i] + (idx-float64(i))*(gaussLUT[i+1]-gaussLUT[i])
 }
 
-func cmapLookup(t float64) [4]byte {
-	i := int(t * float64(cmapLUTN))
-	if i < 0 {
-		return cmapLUT[0]
-	}
-	if i > cmapLUTN {
-		return cmapLUT[cmapLUTN]
-	}
-	return cmapLUT[i]
-}
-
-var sonarColormapStops = []struct {
-	t       float64
-	r, g, b float64
-}{
-	{0.00, 0, 0, 255},
-	{0.12, 0, 200, 255},
-	{0.18, 0, 255, 64},
-	{0.24, 255, 255, 0},
-	{0.32, 255, 128, 0},
-	{0.40, 255, 0, 0},
-	{0.55, 255, 0, 0},
-	{0.70, 140, 0, 0},
-	{0.85, 55, 0, 0},
-	{1.00, 18, 0, 0},
-}
-
-func colormapSonarAmp(t float64) color.RGBA {
-	t = math.Max(0, math.Min(1, t))
-	stops := sonarColormapStops
-	for i := 1; i < len(stops); i++ {
-		if t <= stops[i].t {
-			u := (t - stops[i-1].t) / (stops[i].t - stops[i-1].t)
-			r := stops[i-1].r + u*(stops[i].r-stops[i-1].r)
-			g := stops[i-1].g + u*(stops[i].g-stops[i-1].g)
-			b := stops[i-1].b + u*(stops[i].b-stops[i-1].b)
-			return color.RGBA{
-				R: uint8(math.Round(r)),
-				G: uint8(math.Round(g)),
-				B: uint8(math.Round(b)),
-				A: 255,
+func buildCmapLUT(stops []ColorStop) [cmapLUTN + 1][4]byte {
+	var lut [cmapLUTN + 1][4]byte
+	for i := 0; i <= cmapLUTN; i++ {
+		t := math.Max(0, math.Min(1, float64(i)/float64(cmapLUTN)))
+		var r, g, b float64
+		found := false
+		for j := 1; j < len(stops); j++ {
+			if t <= stops[j].T {
+				u := (t - stops[j-1].T) / (stops[j].T - stops[j-1].T)
+				r = stops[j-1].R + u*(stops[j].R-stops[j-1].R)
+				g = stops[j-1].G + u*(stops[j].G-stops[j-1].G)
+				b = stops[j-1].B + u*(stops[j].B-stops[j-1].B)
+				found = true
+				break
 			}
 		}
+		if !found {
+			last := stops[len(stops)-1]
+			r, g, b = last.R, last.G, last.B
+		}
+		lut[i] = [4]byte{uint8(math.Round(r)), uint8(math.Round(g)), uint8(math.Round(b)), 255}
 	}
-	last := stops[len(stops)-1]
-	return color.RGBA{
-		R: uint8(math.Round(last.r)),
-		G: uint8(math.Round(last.g)),
-		B: uint8(math.Round(last.b)),
-		A: 255,
+	return lut
+}
+
+func cmapLookup(lut *[cmapLUTN + 1][4]byte, t float64) [4]byte {
+	i := int(t * float64(cmapLUTN))
+	if i < 0 {
+		return lut[0]
 	}
+	if i > cmapLUTN {
+		return lut[cmapLUTN]
+	}
+	return lut[i]
 }
 
 // RenderFanSampleGrid renders a sonar fan into a square RGBA image via Gaussian
 // splatting. The dB display window is computed automatically: anchored at the
-// frame noise floor, at least dbWindow wide, and extended to dbDisplayHeadroom
-// above the frame peak so echoes are never saturated.
-func RenderFanSampleGrid(grid *FanSampleGrid, size int) (image.Image, error) {
+// frame noise floor, at least DBWindow wide, and extended to DBDisplayHeadroom
+// above the frame peak so echoes are never saturated. Pass nil for params to
+// use DefaultRenderParams.
+func RenderFanSampleGrid(grid *FanSampleGrid, size int, params *RenderParams) (image.Image, error) {
 	if grid == nil {
 		return nil, fmt.Errorf("fan sample grid is required")
 	}
@@ -121,21 +126,31 @@ func RenderFanSampleGrid(grid *FanSampleGrid, size int) (image.Image, error) {
 		size = DefaultRenderSize
 	}
 
+	p := DefaultRenderParams()
+	if params != nil {
+		p = *params
+		if len(p.ColorStops) < 2 {
+			p.ColorStops = DefaultRenderParams().ColorStops
+		}
+	}
+
+	cmap := buildCmapLUT(p.ColorStops)
+
 	nBeams := grid.NBeams
 	nSamples := grid.NSamples
 	cosTilt := grid.CosTilt
 
 	noiseFloor := float64(grid.MinAmp)
-	dbMin := noiseFloor * dbPerCount
-	dbMax := dbMin + dbWindow
+	dbMin := noiseFloor * p.DBPerCount
+	dbMax := dbMin + p.DBWindow
 	signalPeakDb := dbMin
 	for _, v := range grid.Amps {
-		if db := float64(v) * dbPerCount; db > signalPeakDb {
+		if db := float64(v) * p.DBPerCount; db > signalPeakDb {
 			signalPeakDb = db
 		}
 	}
 	if signalPeakDb > dbMin {
-		dbMax = math.Max(dbMax, signalPeakDb+dbDisplayHeadroom)
+		dbMax = math.Max(dbMax, signalPeakDb+p.DBDisplayHeadroom)
 	}
 	dbSpan := dbMax - dbMin
 	if dbSpan < 1e-9 {
@@ -243,7 +258,7 @@ func RenderFanSampleGrid(grid *FanSampleGrid, size int) (image.Image, error) {
 		if !ok {
 			continue
 		}
-		db := float64(v) * dbPerCount
+		db := float64(v) * p.DBPerCount
 		norm := (db - dbMin) / dbSpan
 		if norm <= 0 {
 			continue
@@ -252,14 +267,14 @@ func RenderFanSampleGrid(grid *FanSampleGrid, size int) (image.Image, error) {
 			norm = 1
 		}
 
-		p := bp[b]
+		bp_ := bp[b]
 		groundRange := float64(s+1) * grid.RangePerSample * cosTilt
-		cx := groundRange * p.cosAZ
-		cy := groundRange * p.sinAZ
+		cx := groundRange * bp_.cosAZ
+		cy := groundRange * bp_.sinAZ
 
-		arcWidthM := groundRange * p.dazRad
-		sigmaRangeM := rangeWidthM * heatmapRangeSigmaFactor
-		sigmaArcM := math.Max(arcWidthM, rangeWidthM) * heatmapArcSigmaFactor
+		arcWidthM := groundRange * bp_.dazRad
+		sigmaRangeM := rangeWidthM * p.HeatmapRangeSigmaFactor
+		sigmaArcM := math.Max(arcWidthM, rangeWidthM) * p.HeatmapArcSigmaFactor
 
 		invSigmaRange := 1.0 / sigmaRangeM
 		invSigmaArc := 1.0 / sigmaArcM
@@ -276,15 +291,15 @@ func RenderFanSampleGrid(grid *FanSampleGrid, size int) (image.Image, error) {
 			if py < 0 || py >= size {
 				continue
 			}
-			rangeDy := float64(dy) * p.rangePerDy
-			arcDy := float64(dy) * p.arcPerDy
+			rangeDy := float64(dy) * bp_.rangePerDy
+			arcDy := float64(dy) * bp_.arcPerDy
 			for dx := -radius; dx <= radius; dx++ {
 				px := ix + dx
 				if px < 0 || px >= size {
 					continue
 				}
-				dRange := float64(dx)*p.rangePerDx + rangeDy
-				dArc := float64(dx)*p.arcPerDx + arcDy
+				dRange := float64(dx)*bp_.rangePerDx + rangeDy
+				dArc := float64(dx)*bp_.arcPerDx + arcDy
 				rr := dRange * invSigmaRange
 				ra := dArc * invSigmaArc
 				heat[py*size+px] += norm * gaussLookup(rr*rr+ra*ra)
@@ -301,7 +316,7 @@ func RenderFanSampleGrid(grid *FanSampleGrid, size int) (image.Image, error) {
 
 	img := image.NewRGBA(image.Rect(0, 0, size, size))
 
-	bg := cmapLookup(0)
+	bg := cmapLookup(&cmap, 0)
 	for i := 0; i < len(img.Pix); i += 4 {
 		img.Pix[i] = bg[0]
 		img.Pix[i+1] = bg[1]
@@ -316,8 +331,8 @@ func RenderFanSampleGrid(grid *FanSampleGrid, size int) (image.Image, error) {
 			heatRow := py * size
 			for px := 0; px < size; px++ {
 				v := heat[heatRow+px] * invMaxHeat
-				if v > heatmapMinThreshold {
-					c := cmapLookup(v)
+				if v > p.HeatmapMinThreshold {
+					c := cmapLookup(&cmap, v)
 					off := rowOff + px*4
 					img.Pix[off] = c[0]
 					img.Pix[off+1] = c[1]
@@ -328,21 +343,5 @@ func RenderFanSampleGrid(grid *FanSampleGrid, size int) (image.Image, error) {
 		}
 	}
 
-	pcx, pcy := toPixelF(0, 0)
-	drawTriangleUp(img, int(pcx), int(pcy), 8, color.RGBA{255, 255, 255, 255})
-
 	return img, nil
-}
-
-func drawTriangleUp(img *image.RGBA, cx, cy, size int, c color.Color) {
-	for dy := 0; dy <= size; dy++ {
-		half := dy
-		for dx := -half; dx <= half; dx++ {
-			x, y := cx+dx, cy-dy
-			if x >= img.Bounds().Min.X && x < img.Bounds().Max.X &&
-				y >= img.Bounds().Min.Y && y < img.Bounds().Max.Y {
-				img.Set(x, y, c)
-			}
-		}
-	}
 }

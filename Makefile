@@ -1,8 +1,10 @@
 .PHONY: setup download render build
 
-OUTPUT     ?= output
+OUTPUT      ?= output
 SEQUENCE_ID ?=
 FPS         ?= 3
+PARAMS      ?=
+TABULAR     ?=
 
 setup:
 	@echo "VIAM_AUTH_TOKEN=$$(viam login print-access-token)" > .env
@@ -12,7 +14,7 @@ download:
 	go run ./cmd/download --sequence-id $(SEQUENCE_ID) --output $(OUTPUT)
 
 render:
-	go run ./cmd/render --output $(OUTPUT) --fps $(FPS)
+	go run ./cmd/render --output $(OUTPUT) --fps $(FPS) $(if $(PARAMS),--params $(PARAMS),) $(if $(TABULAR),--tabular $(TABULAR),)
 
 build:
 	go build -o bin/download ./cmd/download
