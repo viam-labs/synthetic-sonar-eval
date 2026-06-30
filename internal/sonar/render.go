@@ -307,13 +307,6 @@ func RenderFanSampleGrid(grid *FanSampleGrid, size int, params *RenderParams) (i
 		}
 	}
 
-	maxHeat := 0.0
-	for _, v := range heat {
-		if v > maxHeat {
-			maxHeat = v
-		}
-	}
-
 	img := image.NewRGBA(image.Rect(0, 0, size, size))
 
 	bg := cmapLookup(&cmap, 0)
@@ -324,21 +317,26 @@ func RenderFanSampleGrid(grid *FanSampleGrid, size int, params *RenderParams) (i
 		img.Pix[i+3] = bg[3]
 	}
 
-	if maxHeat > 1e-9 {
-		invMaxHeat := 1.0 / maxHeat
-		for py := 0; py < size; py++ {
-			rowOff := py * img.Stride
-			heatRow := py * size
-			for px := 0; px < size; px++ {
-				v := heat[heatRow+px] * invMaxHeat
-				if v > p.HeatmapMinThreshold {
-					c := cmapLookup(&cmap, v)
-					off := rowOff + px*4
-					img.Pix[off] = c[0]
-					img.Pix[off+1] = c[1]
-					img.Pix[off+2] = c[2]
-					img.Pix[off+3] = c[3]
-				}
+	// Absolute intensity: no per-frame max-normalization. `heat` is already in
+	// dB-window-normalized units (per-cell `norm` in [0,1], Gaussian peak 1), so
+	// it maps straight onto the colormap. This keeps intensity comparable across
+	// frames (weak frames stay weak) and makes dbWindow / dbPerCount the real
+	// gain knobs. Overlapping splats can sum past 1, so clamp.
+	for py := 0; py < size; py++ {
+		rowOff := py * img.Stride
+		heatRow := py * size
+		for px := 0; px < size; px++ {
+			v := heat[heatRow+px]
+			if v > 1 {
+				v = 1
+			}
+			if v > p.HeatmapMinThreshold {
+				c := cmapLookup(&cmap, v)
+				off := rowOff + px*4
+				img.Pix[off] = c[0]
+				img.Pix[off+1] = c[1]
+				img.Pix[off+2] = c[2]
+				img.Pix[off+3] = c[3]
 			}
 		}
 	}
