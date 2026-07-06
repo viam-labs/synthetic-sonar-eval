@@ -28,3 +28,7 @@ build:
 	go build -o bin/download       ./cmd/download
 	go build -o bin/render         ./cmd/render
 	go build -o bin/markerplayback ./cmd/markerplayback
+
+
+# make markers PART_ID=f79e293c-612f-496b-b26d-5b8bbaab6524 ORG_ID=4a0a99c7-e680-4cb5-acb1-0bd21449b455 START=2026-07-06T04:00:00Z END=2026-07-07T04:00:00Z (checkmate)
+# make markers PART_ID=ce6d0f26-aeea-48dd-be34-81e4db0f807e ORG_ID=4a0a99c7-e680-4cb5-acb1-0bd21449b455 (synth sim)

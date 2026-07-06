@@ -503,9 +503,15 @@ func main() {
 
 	sequenceID := flag.String("sequence-id", "", "sequence ID to download (required)")
 	outputDir := flag.String("output", "output", "output directory")
-	authToken := flag.String("token", os.Getenv("VIAM_AUTH_TOKEN"), "auth token (or set VIAM_AUTH_TOKEN in .env)")
+	// Default deliberately omitted from the flag registration (and thus from --help output) so a
+	// live token never gets echoed to the terminal; VIAM_AUTH_TOKEN is applied as a fallback below.
+	authToken := flag.String("token", "", "auth token (or set VIAM_AUTH_TOKEN in .env)")
 	pageSize := flag.Uint("page-size", 100, "page size for tabular data pagination")
 	flag.Parse()
+
+	if *authToken == "" {
+		*authToken = os.Getenv("VIAM_AUTH_TOKEN")
+	}
 
 	if *sequenceID == "" {
 		fmt.Fprintln(os.Stderr, "error: --sequence-id is required")

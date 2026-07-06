@@ -4,22 +4,31 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"image/png"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	apppb "go.viam.com/api/app/v1"
 	datapb "go.viam.com/api/app/data/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"synthetic-sonar-eval/internal/sonar"
 )
 
 const viamEndpoint = "app.viam.com:443"
@@ -32,6 +41,23 @@ type Reading struct {
 	Longitude   float64 `json:"longitude"`
 	MarkerID    string  `json:"marker_id"`
 	TS          int64   `json:"ts"`
+}
+
+// ImageFrame is a single camera capture, embedded as base64 so the viewer can
+// load everything from the one dropped JSON file.
+type ImageFrame struct {
+	TS         int64  `json:"ts"`
+	MimeType   string `json:"mimeType"`
+	DataBase64 string `json:"dataBase64"`
+}
+
+// SonarFrame is a single sonar ping, rendered to a heatmap PNG via
+// internal/sonar and embedded as base64 alongside the camera frames.
+type SonarFrame struct {
+	SensorName string `json:"sensorName"`
+	TS         int64  `json:"ts"`
+	MimeType   string `json:"mimeType"`
+	DataBase64 string `json:"dataBase64"`
 }
 
 // buildPipeline mirrors the requested MQL shape: a single $match stage on the
@@ -153,20 +179,346 @@ func sanitizeName(name string) string {
 	return strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_").Replace(name)
 }
 
+func sanitizeTimestamp(ts int64) string {
+	return strings.NewReplacer(":", "-", ".", "-").Replace(time.UnixMilli(ts).UTC().Format(time.RFC3339Nano))
+}
+
+func parseRFC3339(s string) (*timestamppb.Timestamp, error) {
+	if s == "" {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return nil, fmt.Errorf("parse time %q: %w", s, err)
+	}
+	return timestamppb.New(t), nil
+}
+
+func mimeTypeFromExt(ext string) string {
+	switch strings.ToLower(strings.TrimPrefix(ext, ".")) {
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "png":
+		return "image/png"
+	case "gif":
+		return "image/gif"
+	case "webp":
+		return "image/webp"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// binaryDataIDBatchSize caps how many IDs go into a single BinaryDataByIDs
+// call when downloading actual image bytes.
+const binaryDataIDBatchSize = 10
+
+// countImages returns the total number of documents matching filter,
+// independent of pagination.
+func countImages(ctx context.Context, client datapb.DataServiceClient, filter *datapb.Filter) (uint64, error) {
+	resp, err := client.BinaryDataByFilter(ctx, &datapb.BinaryDataByFilterRequest{
+		DataRequest: &datapb.DataRequest{Filter: filter},
+		CountOnly:   true,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return resp.Count, nil
+}
+
+// fetchImageMetadata paginates BinaryDataByFilter (IncludeBinary: false) to
+// enumerate matching captures' metadata, without downloading bytes, stopping
+// once maxResults have been collected (0 = unlimited). The API forces
+// limit=1 whenever include_binary is true, so metadata listing and byte
+// downloading are done as two separate phases. SortOrder must be set to
+// ASCENDING or DESCENDING for multi-page pagination — leaving it unspecified
+// (the zero value) reliably 500s server-side past the first page.
+func fetchImageMetadata(
+	ctx context.Context, client datapb.DataServiceClient, filter *datapb.Filter, pageSize, maxResults uint64,
+) ([]*datapb.BinaryData, error) {
+	var out []*datapb.BinaryData
+	last := ""
+	for {
+		resp, err := client.BinaryDataByFilter(ctx, &datapb.BinaryDataByFilterRequest{
+			DataRequest: &datapb.DataRequest{
+				Filter:    filter,
+				Limit:     pageSize,
+				Last:      last,
+				SortOrder: datapb.Order_ORDER_DESCENDING,
+			},
+			IncludeBinary: false,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(resp.Data) == 0 {
+			break
+		}
+		out = append(out, resp.Data...)
+		if maxResults > 0 && uint64(len(out)) >= maxResults {
+			out = out[:maxResults]
+			break
+		}
+		if resp.Last == "" || uint64(len(resp.Data)) < pageSize {
+			break
+		}
+		last = resp.Last
+	}
+	return out, nil
+}
+
+// fetchImages lists matching camera captures, then downloads their bytes via
+// BinaryDataByIDs in small batches (BinaryDataByFilter can't return bytes for
+// more than one document per call).
+func fetchImages(
+	ctx context.Context, client datapb.DataServiceClient, filter *datapb.Filter, pageSize, maxResults uint64,
+) ([]ImageFrame, error) {
+	metas, err := fetchImageMetadata(ctx, client, filter, pageSize, maxResults)
+	if err != nil {
+		return nil, err
+	}
+
+	frames := make([]ImageFrame, 0, len(metas))
+	for i := 0; i < len(metas); i += binaryDataIDBatchSize {
+		end := min(i+binaryDataIDBatchSize, len(metas))
+		ids := make([]string, 0, end-i)
+		for _, m := range metas[i:end] {
+			ids = append(ids, m.Metadata.BinaryDataId)
+		}
+
+		resp, err := client.BinaryDataByIDs(ctx, &datapb.BinaryDataByIDsRequest{
+			IncludeBinary: true,
+			BinaryDataIds: ids,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("BinaryDataByIDs: %w", err)
+		}
+		for _, d := range resp.Data {
+			meta := d.Metadata
+			mimeType := ""
+			if meta.CaptureMetadata != nil {
+				mimeType = meta.CaptureMetadata.MimeType
+			}
+			if mimeType == "" {
+				mimeType = mimeTypeFromExt(meta.FileExt)
+			}
+			frames = append(frames, ImageFrame{
+				TS:         meta.GetTimeRequested().AsTime().UnixMilli(),
+				MimeType:   mimeType,
+				DataBase64: base64.StdEncoding.EncodeToString(d.Binary),
+			})
+		}
+	}
+
+	sort.Slice(frames, func(i, j int) bool { return frames[i].TS < frames[j].TS })
+	return frames, nil
+}
+
+// extractFanSampleGrid pulls the sonar ping payload out of a raw
+// TabularDataByMQL document (expected under data.readings, matching the
+// payload.readings shape used by the local tabular dumps in output/tabular)
+// via a JSON round-trip, since its field names already match FanSampleGrid's
+// json tags exactly.
+func extractFanSampleGrid(doc map[string]interface{}) (*sonar.FanSampleGrid, bool) {
+	data, _ := doc["data"].(map[string]interface{})
+	values, ok := data["readings"].(map[string]interface{})
+	if !ok {
+		values = data
+	}
+	if values == nil {
+		return nil, false
+	}
+
+	raw, err := json.Marshal(values)
+	if err != nil {
+		return nil, false
+	}
+	var grid sonar.FanSampleGrid
+	if err := json.Unmarshal(raw, &grid); err != nil {
+		return nil, false
+	}
+	if grid.NBeams == 0 || grid.NSamples == 0 {
+		return nil, false
+	}
+	return &grid, true
+}
+
+// renderOneSonarDoc decodes a single TabularDataByMQL raw document into a
+// FanSampleGrid and renders it, returning ok=false (not an error) for
+// documents that can't be turned into a frame.
+func renderOneSonarDoc(raw []byte, sensorName string, size int, params *sonar.RenderParams) (SonarFrame, bool) {
+	var doc map[string]interface{}
+	if err := bson.Unmarshal(raw, &doc); err != nil {
+		return SonarFrame{}, false
+	}
+	grid, ok := extractFanSampleGrid(doc)
+	if !ok {
+		return SonarFrame{}, false
+	}
+	received, ok := doc["time_received"].(primitive.DateTime)
+	if !ok {
+		return SonarFrame{}, false
+	}
+	img, err := sonar.RenderFanSampleGrid(grid, size, params)
+	if err != nil {
+		return SonarFrame{}, false
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return SonarFrame{}, false
+	}
+	return SonarFrame{
+		SensorName: sensorName,
+		TS:         received.Time().UnixMilli(),
+		MimeType:   "image/png",
+		DataBase64: base64.StdEncoding.EncodeToString(buf.Bytes()),
+	}, true
+}
+
+// resolveRobotAndLocation looks up the robot and location IDs that own
+// partID via GetRobotPart. Required for buildCaptureDayPipeline's $match,
+// which mirrors the exact query shape confirmed fast (~1.3s) against this
+// dataset's capture_day index, in cmd/mqlquery.
+func resolveRobotAndLocation(ctx context.Context, client apppb.AppServiceClient, partID string) (robotID, locationID string, err error) {
+	resp, err := client.GetRobotPart(ctx, &apppb.GetRobotPartRequest{Id: partID})
+	if err != nil {
+		return "", "", fmt.Errorf("GetRobotPart: %w", err)
+	}
+	return resp.Part.Robot, resp.Part.LocationId, nil
+}
+
+// buildCaptureDayPipeline matches on capture_day (an indexed day-bucket
+// field) instead of a time_received range via $expr, which isn't
+// index-backed and can time out once a sensor has more than a few thousand
+// matching documents (some sonar sensors here have 250k+ pings across just a
+// few days).
+func buildCaptureDayPipeline(
+	locationID, robotID, partID, componentName, componentType, methodName string, day time.Time, limit uint,
+) []map[string]interface{} {
+	match := map[string]interface{}{
+		"location_id":    locationID,
+		"robot_id":       robotID,
+		"part_id":        partID,
+		"component_name": componentName,
+		"component_type": componentType,
+		"method_name":    methodName,
+		"capture_day":    day,
+	}
+	pipeline := []map[string]interface{}{{"$match": match}}
+	if limit > 0 {
+		pipeline = append(pipeline, map[string]interface{}{"$limit": limit})
+	}
+	return pipeline
+}
+
+// fetchSonarFrames pulls a handful of pings per sensor per calendar day
+// across [start, end] via buildCaptureDayPipeline, rendering each to a
+// heatmap PNG.
+func fetchSonarFrames(
+	ctx context.Context, client datapb.DataServiceClient, orgID, locationID, robotID, partID string,
+	sensorNames []string, componentType, methodName string, start, end string,
+	limit uint, size int, params *sonar.RenderParams,
+) ([]SonarFrame, error) {
+	startTime, err := time.Parse(time.RFC3339, start)
+	if err != nil {
+		return nil, fmt.Errorf("parse start: %w", err)
+	}
+	endTime, err := time.Parse(time.RFC3339, end)
+	if err != nil {
+		return nil, fmt.Errorf("parse end: %w", err)
+	}
+
+	startDay := time.Date(startTime.Year(), startTime.Month(), startTime.Day(), 0, 0, 0, 0, time.UTC)
+	endDay := time.Date(endTime.Year(), endTime.Month(), endTime.Day(), 0, 0, 0, 0, time.UTC)
+	var days []time.Time
+	for d := startDay; !d.After(endDay); d = d.AddDate(0, 0, 1) {
+		days = append(days, d)
+	}
+
+	if limit == 0 {
+		limit = 1
+	}
+	perDay := (limit + uint(len(days)) - 1) / uint(len(days)) // ceil
+	if perDay == 0 {
+		perDay = 1
+	}
+
+	var frames []SonarFrame
+	for _, sensorName := range sensorNames {
+		found, failed := 0, 0
+		for _, day := range days {
+			pipeline := buildCaptureDayPipeline(locationID, robotID, partID, sensorName, componentType, methodName, day, perDay)
+			mqlBinary, err := queryToBinary(pipeline)
+			if err != nil {
+				return nil, fmt.Errorf("%s: build query: %w", sensorName, err)
+			}
+
+			// A day can still time out server-side on rare occasions — treat that as a
+			// soft failure (skip the day) rather than aborting the whole run over one
+			// slow query.
+			resp, err := client.TabularDataByMQL(ctx, &datapb.TabularDataByMQLRequest{
+				OrganizationId: orgID,
+				MqlBinary:      mqlBinary,
+			})
+			if err != nil {
+				failed++
+				continue
+			}
+
+			for _, raw := range resp.RawData {
+				frame, ok := renderOneSonarDoc(raw, sensorName, size, params)
+				if !ok {
+					continue
+				}
+				frames = append(frames, frame)
+				found++
+			}
+		}
+		if failed > 0 {
+			log.Printf("warning: %s: %d/%d day quer(y/ies) failed (timeout or error) and were skipped", sensorName, failed, len(days))
+		}
+		fmt.Printf("%s: rendered %d frame(s) across %d day(s)\n", sensorName, found, len(days))
+	}
+
+	sort.Slice(frames, func(i, j int) bool { return frames[i].TS < frames[j].TS })
+	return frames, nil
+}
+
 func main() {
 	_ = godotenv.Load()
 
 	partID := flag.String("part-id", "", "part ID to pull marker readings for (required)")
 	orgID := flag.String("org-id", os.Getenv("VIAM_ORG_ID"), "organization ID (or set VIAM_ORG_ID in .env)")
-	authToken := flag.String("token", os.Getenv("VIAM_AUTH_TOKEN"), "auth token (or set VIAM_AUTH_TOKEN in .env)")
+	// Default deliberately omitted from the flag registration (and thus from --help output) so a
+	// live token never gets echoed to the terminal; VIAM_AUTH_TOKEN is applied as a fallback below.
+	authToken := flag.String("token", "", "auth token (or set VIAM_AUTH_TOKEN in .env)")
 	componentName := flag.String("component-name", "placemarker-synth-ai", "component name to match")
 	componentType := flag.String("component-type", "rdk:component:sensor", "component type to match")
 	methodName := flag.String("method-name", "Readings", "method name to match")
 	start := flag.String("start", "", "only include readings at/after this RFC3339 time_received (optional)")
 	end := flag.String("end", "", "only include readings at/before this RFC3339 time_received (optional)")
 	limit := flag.Uint("limit", 0, "cap the number of matched documents via $limit (0 = no cap)")
+	imageComponentName := flag.String("image-component-name", "camera-save-predictions", "component name to match for images")
+	imageComponentType := flag.String("image-component-type", "rdk:component:camera", "component type to match for images")
+	imageMethodName := flag.String("image-method-name", "", "method name to match for images (optional)")
+	imagePageSize := flag.Uint("image-page-size", 50, "page size for image pagination")
+	imageLimit := flag.Uint("image-limit", 1000, "cap the number of images fetched (0 = no cap)")
+	skipImages := flag.Bool("skip-images", false, "skip fetching camera images")
+	sonarComponentNames := flag.String("sonar-component-names",
+		"horizontal-h-sensor,horizontal-h3-1-sensor,horizontal-h3-2-sensor,horizontal-h3-3-sensor",
+		"comma-separated sonar sensor component names to render")
+	sonarComponentType := flag.String("sonar-component-type", "rdk:component:sensor", "component type to match for sonar")
+	sonarMethodName := flag.String("sonar-method-name", "Readings", "method name to match for sonar")
+	sonarLimit := flag.Uint("sonar-limit", 60, "number of evenly time-spaced pings to render per sonar sensor")
+	sonarSize := flag.Int("sonar-size", 500, "rendered sonar heatmap size in pixels")
+	sonarParamsFile := flag.String("sonar-params", "", "optional JSON file with sonar render params (same shape as cmd/render --params)")
+	skipSonar := flag.Bool("skip-sonar", false, "skip fetching and rendering sonar data")
 	outputDir := flag.String("output", "output", "output directory")
 	flag.Parse()
+
+	if *authToken == "" {
+		*authToken = os.Getenv("VIAM_AUTH_TOKEN")
+	}
 
 	if *partID == "" {
 		fmt.Fprintln(os.Stderr, "error: --part-id is required")
@@ -195,7 +547,8 @@ func main() {
 	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+*authToken)
 
 	creds := credentials.NewClientTLSFromCert(nil, "")
-	conn, err := grpc.NewClient(viamEndpoint, grpc.WithTransportCredentials(creds))
+	conn, err := grpc.NewClient(viamEndpoint, grpc.WithTransportCredentials(creds),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(32*1024*1024)))
 	if err != nil {
 		log.Fatalf("connect: %v", err)
 	}
@@ -233,8 +586,144 @@ func main() {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		log.Fatalf("mkdir %s: %v", dir, err)
 	}
+
+	// Default the image/sonar window to the pulled readings' span rather than leaving it
+	// unbounded — these resources can hold vastly more historical data than what's
+	// relevant to this part's readings (the camera alone has held 1M+ total captures).
+	effectiveStart, effectiveEnd := *start, *end
+	if effectiveStart == "" && effectiveEnd == "" && len(readings) > 0 {
+		minTS, maxTS := readings[0].TS, readings[0].TS
+		for _, r := range readings {
+			if r.TS < minTS {
+				minTS = r.TS
+			}
+			if r.TS > maxTS {
+				maxTS = r.TS
+			}
+		}
+		effectiveStart = time.UnixMilli(minTS).UTC().Format(time.RFC3339)
+		effectiveEnd = time.UnixMilli(maxTS).UTC().Format(time.RFC3339)
+		log.Printf("no --start/--end given; scoping images/sonar to the readings' time span (%s to %s)",
+			effectiveStart, effectiveEnd)
+	}
+
+	var images []ImageFrame
+	if !*skipImages {
+		startTS, err := parseRFC3339(effectiveStart)
+		if err != nil {
+			log.Fatalf("start: %v", err)
+		}
+		endTS, err := parseRFC3339(effectiveEnd)
+		if err != nil {
+			log.Fatalf("end: %v", err)
+		}
+
+		imageFilter := &datapb.Filter{
+			PartId:          *partID,
+			OrganizationIds: []string{*orgID},
+			ComponentName:   *imageComponentName,
+			ComponentType:   *imageComponentType,
+		}
+		if *imageMethodName != "" {
+			imageFilter.Method = *imageMethodName
+		}
+		if startTS != nil || endTS != nil {
+			imageFilter.Interval = &datapb.CaptureInterval{Start: startTS, End: endTS}
+		}
+
+		totalImages, err := countImages(ctx, client, imageFilter)
+		if err != nil {
+			log.Fatalf("count images: %v", err)
+		}
+		if *imageLimit > 0 && totalImages > uint64(*imageLimit) {
+			log.Printf("warning: %d image(s) matched but only fetching the first %d (--image-limit)", totalImages, *imageLimit)
+		}
+
+		images, err = fetchImages(ctx, client, imageFilter, uint64(*imagePageSize), uint64(*imageLimit))
+		if err != nil {
+			log.Fatalf("BinaryDataByFilter: %v", err)
+		}
+		fmt.Printf("matched %d image(s)\n", len(images))
+
+		if len(images) > 0 {
+			imagesDir := filepath.Join(dir, "images")
+			if err := os.MkdirAll(imagesDir, 0755); err != nil {
+				log.Fatalf("mkdir %s: %v", imagesDir, err)
+			}
+			for _, img := range images {
+				raw, err := base64.StdEncoding.DecodeString(img.DataBase64)
+				if err != nil {
+					log.Fatalf("decode image at ts %d: %v", img.TS, err)
+				}
+				ext := ".jpg"
+				if img.MimeType == "image/png" {
+					ext = ".png"
+				}
+				imgPath := filepath.Join(imagesDir, sanitizeTimestamp(img.TS)+ext)
+				if err := os.WriteFile(imgPath, raw, 0644); err != nil {
+					log.Fatalf("write %s: %v", imgPath, err)
+				}
+			}
+		}
+	}
+
+	var sonarFrames []SonarFrame
+	if !*skipSonar {
+		var renderParams *sonar.RenderParams
+		if *sonarParamsFile != "" {
+			p := sonar.DefaultRenderParams()
+			data, err := os.ReadFile(*sonarParamsFile)
+			if err != nil {
+				log.Fatalf("read sonar params file: %v", err)
+			}
+			if err := json.Unmarshal(data, &p); err != nil {
+				log.Fatalf("parse sonar params file: %v", err)
+			}
+			renderParams = &p
+		}
+
+		var sensorNames []string
+		for _, s := range strings.Split(*sonarComponentNames, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				sensorNames = append(sensorNames, s)
+			}
+		}
+
+		appClient := apppb.NewAppServiceClient(conn)
+		robotID, locationID, err := resolveRobotAndLocation(ctx, appClient, *partID)
+		if err != nil {
+			log.Fatalf("resolve robot/location for sonar query: %v", err)
+		}
+
+		sonarFrames, err = fetchSonarFrames(
+			ctx, client, *orgID, locationID, robotID, *partID, sensorNames, *sonarComponentType, *sonarMethodName,
+			effectiveStart, effectiveEnd, *sonarLimit, *sonarSize, renderParams,
+		)
+		if err != nil {
+			log.Fatalf("fetch sonar: %v", err)
+		}
+		fmt.Printf("rendered %d sonar frame(s) total\n", len(sonarFrames))
+
+		if len(sonarFrames) > 0 {
+			for _, frame := range sonarFrames {
+				raw, err := base64.StdEncoding.DecodeString(frame.DataBase64)
+				if err != nil {
+					log.Fatalf("decode sonar frame at ts %d: %v", frame.TS, err)
+				}
+				sonarDir := filepath.Join(dir, "sonar-images", sanitizeName(frame.SensorName))
+				if err := os.MkdirAll(sonarDir, 0755); err != nil {
+					log.Fatalf("mkdir %s: %v", sonarDir, err)
+				}
+				framePath := filepath.Join(sonarDir, sanitizeTimestamp(frame.TS)+".png")
+				if err := os.WriteFile(framePath, raw, 0644); err != nil {
+					log.Fatalf("write %s: %v", framePath, err)
+				}
+			}
+		}
+	}
+
 	path := filepath.Join(dir, "readings.json")
-	data, err := json.MarshalIndent(map[string]any{"readings": readings}, "", "  ")
+	data, err := json.MarshalIndent(map[string]any{"readings": readings, "images": images, "sonarFrames": sonarFrames}, "", "  ")
 	if err != nil {
 		log.Fatalf("marshal readings: %v", err)
 	}
@@ -242,5 +731,6 @@ func main() {
 		log.Fatalf("write %s: %v", path, err)
 	}
 
-	fmt.Printf("wrote %d readings to %s\n", len(readings), path)
+	fmt.Printf("wrote %d readings, %d images, and %d sonar frames to %s\n",
+		len(readings), len(images), len(sonarFrames), path)
 }

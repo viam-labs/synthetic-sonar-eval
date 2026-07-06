@@ -38,14 +38,14 @@ type RenderParams struct {
 // DefaultRenderParams returns the default rendering parameters.
 func DefaultRenderParams() RenderParams {
 	return RenderParams{
-		DBPerCount:              0.5,
-		DBWindow:                6000.0,
-		DBDisplayHeadroom:       300.0,
-		HeatmapRangeSigmaFactor: 0.5,
-		HeatmapArcSigmaFactor:   0.7,
-		HeatmapMinThreshold:     0.01,
+		DBPerCount:              0.2,
+		DBWindow:                3000.0,
+		DBDisplayHeadroom:       200.0,
+		HeatmapRangeSigmaFactor: 1.5,
+		HeatmapArcSigmaFactor:   0.5,
+		HeatmapMinThreshold:     0.03,
 		ColorStops: []ColorStop{
-			{0.00, 2, 0, 127},
+			{0.00, 0, 0, 0},
 			{0.12, 0, 200, 255},
 			{0.18, 0, 255, 64},
 			{0.24, 255, 255, 0},
