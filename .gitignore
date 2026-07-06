@@ -3,3 +3,4 @@ synthetic-sonar-eval
 .DS_Store
 output
 output.zip
+bin/

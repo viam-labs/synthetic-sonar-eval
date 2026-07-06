@@ -94,6 +94,45 @@ Optional flags:
 | `--size` | `1500` | Sonar image size in pixels |
 | `--tabular` / `TABULAR` | `<output>/tabular` | Tabular JSON input directory |
 
+### 4. Marker playback data
+
+Pulls marker-placement sensor readings for a single part via Viam's `TabularDataByMQL` API,
+for use with the [placement-playback](placement-playback) viewer:
+
+```
+make markers PART_ID=<part-id>
+```
+
+Optionally scope the pull to a time range (RFC3339 `time_received` bounds):
+
+```
+make markers PART_ID=<part-id> START=2026-07-05T00:00:00Z END=2026-07-06T00:00:00Z
+```
+
+Requires `ORG_ID` (or `VIAM_ORG_ID` in `.env`) in addition to the usual `VIAM_AUTH_TOKEN`.
+
+**Output layout:**
+
+```
+output/
+  marker-playback/
+    <part-id>/
+      readings.json            # { "readings": [...] } — load directly into placement-playback
+```
+
+Optional flags (passed via `go run` directly if needed):
+
+| Flag | Default | Description |
+|---|---|---|
+| `--org-id` / `ORG_ID` | _(from `VIAM_ORG_ID`)_ | Organization ID (required) |
+| `--component-name` | `placemarker-synth-ai` | Component name to match |
+| `--component-type` | `rdk:component:sensor` | Component type to match |
+| `--method-name` | `Readings` | Method name to match |
+| `--start` / `START` | _(none)_ | Only readings at/after this RFC3339 `time_received` |
+| `--end` / `END` | _(none)_ | Only readings at/before this RFC3339 `time_received` |
+| `--limit` | `0` (no cap) | Caps matched documents via an MQL `$limit` stage |
+| `--output` / `OUTPUT` | `output` | Output directory |
+
 ### Full run
 
 ```
