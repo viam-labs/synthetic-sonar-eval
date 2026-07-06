@@ -1,8 +1,9 @@
-import type { ImageFrame, Reading } from '../types';
+import type { ImageFrame, Reading, SonarFrame } from '../types';
 
 export interface ParsedPlayback {
   readings: Reading[];
   images: ImageFrame[];
+  sonarFrames: SonarFrame[];
 }
 
 function normalizeReadings(arr: unknown[]): Reading[] {
@@ -38,19 +39,37 @@ function normalizeImages(arr: unknown[]): ImageFrame[] {
   return images.sort((a, b) => a.ts - b.ts);
 }
 
+function normalizeSonarFrames(arr: unknown[]): SonarFrame[] {
+  const frames: SonarFrame[] = [];
+  arr.forEach((raw) => {
+    if (!raw || typeof raw !== 'object') return;
+    const r = raw as Record<string, unknown>;
+    if (typeof r.ts !== 'number' || typeof r.dataBase64 !== 'string') return;
+    frames.push({
+      sensorName: typeof r.sensorName === 'string' ? r.sensorName : 'sonar',
+      ts: r.ts,
+      mimeType: typeof r.mimeType === 'string' ? r.mimeType : 'image/png',
+      dataBase64: r.dataBase64,
+    });
+  });
+  return frames.sort((a, b) => a.ts - b.ts);
+}
+
 /**
- * Accepts a JSON array of readings, a JSON object with `readings` (and optional `images`) array
- * fields, or NDJSON (one reading per line — images aren't supported in that form).
+ * Accepts a JSON array of readings, a JSON object with `readings` (and optional `images` /
+ * `sonarFrames`) array fields, or NDJSON (one reading per line — images/sonar frames aren't
+ * supported in that form).
  */
 export function parsePlaybackFile(text: string): ParsedPlayback {
   try {
     const parsed: unknown = JSON.parse(text);
-    if (Array.isArray(parsed)) return { readings: normalizeReadings(parsed), images: [] };
+    if (Array.isArray(parsed)) return { readings: normalizeReadings(parsed), images: [], sonarFrames: [] };
     if (parsed && typeof parsed === 'object') {
       const obj = parsed as Record<string, unknown>;
       const readings = Array.isArray(obj.readings) ? normalizeReadings(obj.readings) : [];
       const images = Array.isArray(obj.images) ? normalizeImages(obj.images) : [];
-      return { readings, images };
+      const sonarFrames = Array.isArray(obj.sonarFrames) ? normalizeSonarFrames(obj.sonarFrames) : [];
+      return { readings, images, sonarFrames };
     }
   } catch {
     // not a single JSON document — fall through to NDJSON parsing
@@ -66,5 +85,5 @@ export function parsePlaybackFile(text: string): ParsedPlayback {
       // skip malformed lines
     }
   }
-  return { readings: normalizeReadings(rawReadings), images: [] };
+  return { readings: normalizeReadings(rawReadings), images: [], sonarFrames: [] };
 }

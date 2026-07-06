@@ -1,8 +1,23 @@
 import { useEffect, useRef } from 'react';
-import { CircleMarker, MapContainer, Marker, Popup, TileLayer, useMap } from 'react-leaflet';
+import { CircleMarker, MapContainer, Marker, Popup, TileLayer, Tooltip, useMap } from 'react-leaflet';
 import { divIcon, latLngBounds } from 'leaflet';
 import type { Reading } from '../types';
 import { formatTs } from '../utils/formatTs';
+
+// A simple boat silhouette (mast + sail + hull) marking the current position in the journey —
+// the location of the most recently placed marker as of the scrubber's current time.
+const BOAT_ICON = divIcon({
+  className: '',
+  html: `<div class="boat-marker">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="white">
+      <rect x="11.25" y="2" width="1.5" height="12" />
+      <path d="M12 2 L18 13 L12 13 Z" />
+      <path d="M3 15 L21 15 L18 20.5 L6 20.5 Z" />
+    </svg>
+  </div>`,
+  iconSize: [30, 30],
+  iconAnchor: [15, 15],
+});
 
 interface MapViewProps {
   allReadings: Reading[];
@@ -81,6 +96,8 @@ function ReadingPopup({ r, onJumpToTime }: { r: Reading; onJumpToTime: (ts: numb
 
 export function MapView({ allReadings, visible, justDropped, onJumpToTime }: MapViewProps) {
   const justDroppedIds = new Set(justDropped.map((r) => r.marker_id));
+  // visible is sorted ascending by ts, so the last entry is wherever the journey currently stands.
+  const boatPosition = visible.at(-1);
 
   return (
     <MapContainer
@@ -131,6 +148,17 @@ export function MapView({ allReadings, visible, justDropped, onJumpToTime }: Map
           <ReadingPopup r={r} onJumpToTime={onJumpToTime} />
         </Marker>
       ))}
+      {boatPosition && (
+        <Marker
+          position={[boatPosition.latitude, boatPosition.longitude]}
+          icon={BOAT_ICON}
+          zIndexOffset={1000}
+        >
+          <Tooltip direction="top" offset={[0, -16]}>
+            Current position · {boatPosition.marker_id}
+          </Tooltip>
+        </Marker>
+      )}
     </MapContainer>
   );
 }

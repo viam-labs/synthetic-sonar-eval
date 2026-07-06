@@ -6,6 +6,7 @@
 
   --color-real: #38bdf8;
   --color-synthetic: #fb923c;
+  --color-boat: #a78bfa;
 }
 
 html,
@@ -66,4 +67,27 @@ body {
 .drop-marker--synthetic {
   background: color-mix(in oklab, var(--color-synthetic) 90%, transparent);
   box-shadow: 0 0 0 4px color-mix(in oklab, var(--color-synthetic) 25%, transparent);
+}
+
+/* Current-position boat indicator: sits at the most recently placed marker. */
+@keyframes boat-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-boat) 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 10px color-mix(in oklab, var(--color-boat) 0%, transparent);
+  }
+}
+
+.boat-marker {
+  width: 30px;
+  height: 30px;
+  border-radius: 9999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-boat);
+  border: 2px solid white;
+  animation: boat-pulse 2s ease-in-out infinite;
 }

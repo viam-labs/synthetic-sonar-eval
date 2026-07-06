@@ -12,3 +12,10 @@ export interface ImageFrame {
   mimeType: string;
   dataBase64: string;
 }
+
+export interface SonarFrame {
+  sensorName: string;
+  ts: number;
+  mimeType: string;
+  dataBase64: string;
+}

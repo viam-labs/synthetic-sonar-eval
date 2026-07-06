@@ -4,22 +4,22 @@ import { TimeSlider } from './components/TimeSlider';
 import { Legend } from './components/Legend';
 import { FileLoader } from './components/FileLoader';
 import { ImagePanel } from './components/ImagePanel';
+import { SonarPanel } from './components/SonarPanel';
 import { MarkerListPanel } from './components/MarkerListPanel';
+import { TimelineGalleryPage } from './pages/TimelineGalleryPage';
 import { parsePlaybackFile } from './utils/parseReadings';
-import type { ImageFrame, Reading } from './types';
+import type { ImageFrame, Reading, SonarFrame } from './types';
 
 const TICK_MS = 50;
 // A marker still gets the "just dropped" pulse animation for this long (in
 // simulated time) after its own ts, so continuous scrubbing/playback still
 // reads as markers appearing rather than just popping into a static list.
 const DROP_WINDOW_MS = 3_000;
-// Only show a camera frame if one was captured within this long of the
-// current scrubber position — otherwise the frame is considered stale.
-const IMAGE_STALE_MS = 60_000;
 
 export default function App() {
   const [readings, setReadings] = useState<Reading[]>([]);
   const [images, setImages] = useState<ImageFrame[]>([]);
+  const [sonarFrames, setSonarFrames] = useState<SonarFrame[]>([]);
   const [fileName, setFileName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [currentTs, setCurrentTs] = useState(0);
@@ -27,9 +27,18 @@ export default function App() {
   const [playDirection, setPlayDirection] = useState<0 | 1 | -1>(0);
   const [speed, setSpeed] = useState(1);
   const [selectedMarkerType, setSelectedMarkerType] = useState<'real' | 'synthetic' | null>(null);
+  const [showLoader, setShowLoader] = useState(true);
+  const [page, setPage] = useState<'map' | 'gallery'>('map');
 
-  const minTs = useMemo(() => (readings.length ? Math.min(...readings.map((r) => r.ts)) : 0), [readings]);
-  const maxTs = useMemo(() => (readings.length ? Math.max(...readings.map((r) => r.ts)) : 0), [readings]);
+  // The timeline spans the earliest/latest event across readings, camera frames, and sonar
+  // frames, not just readings — otherwise images/sonar pings outside the marker time range
+  // would never be reachable by scrubbing.
+  const allTs = useMemo(
+    () => [...readings.map((r) => r.ts), ...images.map((i) => i.ts), ...sonarFrames.map((f) => f.ts)],
+    [readings, images, sonarFrames],
+  );
+  const minTs = useMemo(() => (allTs.length ? Math.min(...allTs) : 0), [allTs]);
+  const maxTs = useMemo(() => (allTs.length ? Math.max(...allTs) : 0), [allTs]);
 
   const visible = useMemo(() => readings.filter((r) => r.ts <= currentTs), [readings, currentTs]);
   const justDropped = useMemo(
@@ -39,13 +48,6 @@ export default function App() {
   // Already sorted ascending by ts (parsePlaybackFile guarantees this).
   const realMarkers = useMemo(() => readings.filter((r) => !r.is_synthetic), [readings]);
   const syntheticMarkers = useMemo(() => readings.filter((r) => r.is_synthetic), [readings]);
-  // images is sorted ascending by ts, so the last one at/before currentTs is the most recent frame;
-  // drop it once it's older than IMAGE_STALE_MS so a long-gone frame doesn't linger forever.
-  const currentImage = useMemo(() => {
-    const candidate = images.filter((img) => img.ts <= currentTs).at(-1);
-    if (!candidate || currentTs - candidate.ts > IMAGE_STALE_MS) return null;
-    return candidate;
-  }, [images, currentTs]);
 
   const lastFrameRef = useRef<number | null>(null);
 
@@ -79,7 +81,7 @@ export default function App() {
     setCurrentTs(ts);
   }
 
-  function loadPlayback(list: Reading[], frames: ImageFrame[], name: string | null) {
+  function loadPlayback(list: Reading[], frames: ImageFrame[], sonar: SonarFrame[], name: string | null) {
     if (list.length === 0) {
       setError('No valid readings found (need at least latitude and longitude fields).');
       return;
@@ -88,8 +90,11 @@ export default function App() {
     setFileName(name);
     setReadings(list);
     setImages(frames);
-    setCurrentTs(Math.min(...list.map((r) => r.ts)));
+    setSonarFrames(sonar);
+    const allTs = [...list.map((r) => r.ts), ...frames.map((f) => f.ts), ...sonar.map((f) => f.ts)];
+    setCurrentTs(Math.min(...allTs));
     setPlayDirection(0);
+    setShowLoader(false);
   }
 
   return (
@@ -102,39 +107,92 @@ export default function App() {
           </h1>
           <span className="hidden text-sm text-slate-300 sm:inline">Marker &amp; camera playback</span>
         </div>
-        <Legend
-          selected={selectedMarkerType}
-          onSelect={(type) => setSelectedMarkerType((cur) => (cur === type ? null : type))}
-        />
+        <div className="flex items-center gap-4">
+          {!showLoader && (
+            <div className="flex items-center gap-1 rounded-full border border-slate-700 bg-slate-900/60 p-0.5 text-sm">
+              <button
+                onClick={() => setPage('map')}
+                className={`rounded-full px-3 py-1 font-medium transition-colors ${
+                  page === 'map' ? 'bg-sky-400/20 text-sky-200' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Map
+              </button>
+              <button
+                onClick={() => setPage('gallery')}
+                className={`rounded-full px-3 py-1 font-medium transition-colors ${
+                  page === 'gallery' ? 'bg-sky-400/20 text-sky-200' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Gallery
+              </button>
+            </div>
+          )}
+          <Legend
+            selected={selectedMarkerType}
+            onSelect={(type) => setSelectedMarkerType((cur) => (cur === type ? null : type))}
+          />
+        </div>
       </header>
 
-      <div className="flex min-h-0 flex-1">
-        <aside className="w-72 shrink-0 overflow-y-auto border-r border-slate-800/80 bg-slate-900/20 p-4">
-          <FileLoader
-            onLoad={(text, name) => {
-              const { readings, images } = parsePlaybackFile(text);
-              loadPlayback(readings, images, name);
-            }}
-            fileName={fileName}
-            error={error}
-          />
-        </aside>
+      {!showLoader && page === 'gallery' ? (
+        <TimelineGalleryPage
+          images={images}
+          sonarFrames={sonarFrames}
+          minTs={minTs}
+          maxTs={maxTs}
+          currentTs={currentTs}
+          onSeek={jumpToTime}
+        />
+      ) : (
+        <div className="flex min-h-0 flex-1">
+          <aside className="w-104 shrink-0 overflow-y-auto border-r border-slate-800/80 bg-slate-900/20 p-4">
+            {showLoader ? (
+              <FileLoader
+                onLoad={(text, name) => {
+                  const { readings, images, sonarFrames } = parsePlaybackFile(text);
+                  loadPlayback(readings, images, sonarFrames, name);
+                }}
+                fileName={fileName}
+                error={error}
+              />
+            ) : (
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="truncate text-xs text-slate-400" title={fileName ?? undefined}>
+                    {fileName}
+                  </p>
+                  <button
+                    onClick={() => {
+                      setShowLoader(true);
+                      setFileName(null);
+                    }}
+                    className="shrink-0 text-xs font-medium text-sky-300 hover:text-sky-200 hover:underline"
+                  >
+                    Change file
+                  </button>
+                </div>
+                <ImagePanel images={images} currentTs={currentTs} onJumpToTime={jumpToTime} />
+                <SonarPanel sonarFrames={sonarFrames} currentTs={currentTs} onJumpToTime={jumpToTime} />
+              </div>
+            )}
+          </aside>
 
-        <main className="relative min-w-0 flex-1">
-          <MapView allReadings={readings} visible={visible} justDropped={justDropped} onJumpToTime={jumpToTime} />
-          <ImagePanel image={currentImage} />
-        </main>
+          <main className="relative min-w-0 flex-1">
+            <MapView allReadings={readings} visible={visible} justDropped={justDropped} onJumpToTime={jumpToTime} />
+          </main>
 
-        {selectedMarkerType && (
-          <MarkerListPanel
-            type={selectedMarkerType}
-            markers={selectedMarkerType === 'real' ? realMarkers : syntheticMarkers}
-            currentTs={currentTs}
-            onJumpToTime={jumpToTime}
-            onClose={() => setSelectedMarkerType(null)}
-          />
-        )}
-      </div>
+          {selectedMarkerType && (
+            <MarkerListPanel
+              type={selectedMarkerType}
+              markers={selectedMarkerType === 'real' ? realMarkers : syntheticMarkers}
+              currentTs={currentTs}
+              onJumpToTime={jumpToTime}
+              onClose={() => setSelectedMarkerType(null)}
+            />
+          )}
+        </div>
+      )}
 
       <footer className="shrink-0 border-t border-slate-800/80 bg-slate-900/40 px-6 py-3">
         <TimeSlider
