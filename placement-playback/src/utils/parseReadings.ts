@@ -1,6 +1,11 @@
-import type { Reading } from '../types';
+import type { ImageFrame, Reading } from '../types';
 
-function normalize(arr: unknown[]): Reading[] {
+export interface ParsedPlayback {
+  readings: Reading[];
+  images: ImageFrame[];
+}
+
+function normalizeReadings(arr: unknown[]): Reading[] {
   const readings: Reading[] = [];
   arr.forEach((raw, i) => {
     if (!raw || typeof raw !== 'object') return;
@@ -18,28 +23,48 @@ function normalize(arr: unknown[]): Reading[] {
   return readings.sort((a, b) => a.ts - b.ts);
 }
 
-/** Accepts a JSON array, a JSON object with a `readings` array field, or NDJSON (one reading per line). */
-export function parseReadingsFile(text: string): Reading[] {
+function normalizeImages(arr: unknown[]): ImageFrame[] {
+  const images: ImageFrame[] = [];
+  arr.forEach((raw) => {
+    if (!raw || typeof raw !== 'object') return;
+    const r = raw as Record<string, unknown>;
+    if (typeof r.ts !== 'number' || typeof r.dataBase64 !== 'string') return;
+    images.push({
+      ts: r.ts,
+      mimeType: typeof r.mimeType === 'string' ? r.mimeType : 'image/jpeg',
+      dataBase64: r.dataBase64,
+    });
+  });
+  return images.sort((a, b) => a.ts - b.ts);
+}
+
+/**
+ * Accepts a JSON array of readings, a JSON object with `readings` (and optional `images`) array
+ * fields, or NDJSON (one reading per line — images aren't supported in that form).
+ */
+export function parsePlaybackFile(text: string): ParsedPlayback {
   try {
     const parsed: unknown = JSON.parse(text);
-    if (Array.isArray(parsed)) return normalize(parsed);
+    if (Array.isArray(parsed)) return { readings: normalizeReadings(parsed), images: [] };
     if (parsed && typeof parsed === 'object') {
       const obj = parsed as Record<string, unknown>;
-      if (Array.isArray(obj.readings)) return normalize(obj.readings);
+      const readings = Array.isArray(obj.readings) ? normalizeReadings(obj.readings) : [];
+      const images = Array.isArray(obj.images) ? normalizeImages(obj.images) : [];
+      return { readings, images };
     }
   } catch {
     // not a single JSON document — fall through to NDJSON parsing
   }
 
-  const readings: unknown[] = [];
+  const rawReadings: unknown[] = [];
   for (const line of text.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      readings.push(JSON.parse(trimmed));
+      rawReadings.push(JSON.parse(trimmed));
     } catch {
       // skip malformed lines
     }
   }
-  return normalize(readings);
+  return { readings: normalizeReadings(rawReadings), images: [] };
 }

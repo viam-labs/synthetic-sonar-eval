@@ -6,3 +6,9 @@ export interface Reading {
   marker_id: string;
   ts: number;
 }
+
+export interface ImageFrame {
+  ts: number;
+  mimeType: string;
+  dataBase64: string;
+}

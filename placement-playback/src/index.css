@@ -1,43 +1,69 @@
-:root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+@import 'tailwindcss';
 
-  font: 16px/145% var(--sans);
-  color-scheme: light dark;
-  color: var(--text);
-  background: var(--bg);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', Consolas, monospace;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-  }
-}
-
-* {
-  box-sizing: border-box;
+  --color-real: #38bdf8;
+  --color-synthetic: #fb923c;
 }
 
 html,
 body,
 #root {
   height: 100%;
-  margin: 0;
 }
 
-h1 {
-  font-family: var(--sans);
-  font-weight: 600;
-  color: var(--text-h);
+body {
+  @apply bg-slate-950 font-sans text-slate-100 antialiased;
+}
+
+/* Leaflet chrome re-themed to match the app's dark shell. */
+.leaflet-popup-content-wrapper {
+  @apply rounded-xl border border-slate-700/80 bg-slate-900/95 text-slate-100 shadow-2xl;
+}
+.leaflet-popup-tip {
+  @apply bg-slate-900/95;
+}
+.leaflet-popup-content {
+  @apply m-3 text-sm leading-relaxed;
+}
+.leaflet-popup-close-button {
+  @apply text-slate-400!;
+}
+.leaflet-container a.leaflet-popup-close-button:hover {
+  @apply text-slate-100!;
+}
+
+/* "Just dropped" marker pulse. */
+@keyframes drop-pulse {
+  0% {
+    transform: scale(0.3);
+    opacity: 0.4;
+  }
+  40% {
+    transform: scale(1.6);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.drop-marker {
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  animation: drop-pulse 0.9s ease-out;
+}
+
+.drop-marker--real {
+  background: color-mix(in oklab, var(--color-real) 90%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--color-real) 25%, transparent);
+}
+
+.drop-marker--synthetic {
+  background: color-mix(in oklab, var(--color-synthetic) 90%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--color-synthetic) 25%, transparent);
 }
