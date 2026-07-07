@@ -10,6 +10,9 @@ package main
 import (
 	"flag"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"io/fs"
 	"log"
 	"os"
@@ -27,6 +30,10 @@ func main() {
 	confidence := flag.Float64("confidence", 0.6, "minimum detection confidence")
 	classFilter := flag.String("class", "", "if set, only print/count detections of this class name")
 	libPath := flag.String("onnxruntime-lib", "", "path to libonnxruntime.{dylib,so}; defaults to $ONNXRUNTIME_LIB_PATH or common install locations")
+	tensorBatchSize := flag.Int("tensor-batch-size", 1, "EXPERIMENTAL (directory input only): stack this many images into a "+
+		"single real ONNX batch tensor per Run() call instead of one image at a time. This model's input has its batch "+
+		"dimension fixed at 1, so any value >1 is expected to fail — this flag exists to reproduce/inspect that failure "+
+		"directly (see internal/detector.Detector.DetectBatch)")
 	flag.Parse()
 
 	if *imagePath == "" {
@@ -66,6 +73,14 @@ func main() {
 	}
 	defer d.Close()
 
+	if *tensorBatchSize > 1 {
+		if !isDir {
+			log.Fatalf("--tensor-batch-size requires a directory of images (got a single image)")
+		}
+		runTensorBatchExperiment(d, paths, *tensorBatchSize, float32(*confidence))
+		return
+	}
+
 	start := time.Now()
 	imagesWithDetections := 0
 	totalDetections := 0
@@ -103,6 +118,46 @@ func main() {
 	perImage := totalElapsed / time.Duration(len(paths))
 	fmt.Printf("%d image(s) processed, %d with detection(s) (%d total detection(s)), in %s (%s/image)\n",
 		len(paths), imagesWithDetections, totalDetections, totalElapsed.Round(time.Millisecond), perImage.Round(time.Millisecond))
+}
+
+// runTensorBatchExperiment groups paths into chunks of batchSize and attempts
+// to run each chunk through the model as a single real batched ONNX tensor
+// (shape [batchSize, 3, H, W]) via Detector.DetectBatch, instead of one image
+// at a time. This model's ONNX input has its batch dimension fixed at 1, so
+// this is expected to fail on the very first chunk — it exists to reproduce
+// that failure directly from Go, not as a working batching path.
+func runTensorBatchExperiment(d *detector.Detector, paths []string, batchSize int, minConfidence float32) {
+	numBatches := (len(paths) + batchSize - 1) / batchSize
+	fmt.Printf("EXPERIMENT: attempting real tensor batching with batch size %d across %d batch(es) "+
+		"(expected to fail — this model's ONNX input has its batch dimension fixed at 1)\n", batchSize, numBatches)
+
+	for i := 0; i < len(paths); i += batchSize {
+		end := min(i+batchSize, len(paths))
+		chunk := paths[i:end]
+
+		imgs := make([]image.Image, 0, len(chunk))
+		for _, p := range chunk {
+			f, err := os.Open(p)
+			if err != nil {
+				log.Fatalf("open %s: %v", p, err)
+			}
+			img, _, err := image.Decode(f)
+			f.Close()
+			if err != nil {
+				log.Fatalf("decode %s: %v", p, err)
+			}
+			imgs = append(imgs, img)
+		}
+
+		fmt.Printf("[batch %d/%d] stacking %d image(s):\n", i/batchSize+1, numBatches, len(imgs))
+		for _, p := range chunk {
+			fmt.Printf("  - %s\n", p)
+		}
+
+		if _, err := d.DetectBatch(imgs, minConfidence); err != nil {
+			log.Fatalf("batched detect failed: %v", err)
+		}
+	}
 }
 
 // collectImagePaths recursively finds image files (by extension) under dir,

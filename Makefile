@@ -18,10 +18,20 @@ DETECT      ?=
 setup:
 	@echo "VIAM_AUTH_TOKEN=$$(viam login print-access-token)" > .env
 
+# download supports two mutually exclusive modes: a whole recorded sequence
+# (SEQUENCE_ID) or a time range (START+END, needs ORG_ID). Both require
+# PART_ID, since data lands under output/<part-id>/<hash-of-params>/ and is
+# skipped (with a message) if that hash directory already exists.
 download:
-	@test -n "$(SEQUENCE_ID)" || (echo "error: SEQUENCE_ID is required  →  make download SEQUENCE_ID=<id>" && exit 1)
-	go run ./cmd/download --sequence-id $(SEQUENCE_ID) --output $(OUTPUT)
+	@test -n "$(PART_ID)" || (echo "error: PART_ID is required  →  make download PART_ID=<id> SEQUENCE_ID=<id>" && exit 1)
+	@test -n "$(SEQUENCE_ID)$(START)$(END)" || (echo "error: SEQUENCE_ID or START+END is required" && exit 1)
+	go run ./cmd/download --part-id $(PART_ID) --output $(OUTPUT) \
+		$(if $(SEQUENCE_ID),--sequence-id $(SEQUENCE_ID),) \
+		$(if $(START),--start $(START),) $(if $(END),--end $(END),) \
+		$(if $(ORG_ID),--org-id $(ORG_ID),)
 
+# point OUTPUT at the specific download to render, e.g.
+# make render OUTPUT=output/<part-id>/<hash>
 render:
 	go run ./cmd/render --output $(OUTPUT) --fps $(FPS) $(if $(PARAMS),--params $(PARAMS),) $(if $(TABULAR),--tabular $(TABULAR),)
 
