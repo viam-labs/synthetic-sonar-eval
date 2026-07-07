@@ -79,7 +79,30 @@ type tabularDataPoint struct {
 	Payload      json.RawMessage `json:"payload"`
 }
 
+// countTabularFiles counts the .json tabular files under tabularDir, so
+// renderSonarImages can report progress as "x/total" rather than just a
+// running count.
+func countTabularFiles(tabularDir string) (int, error) {
+	total := 0
+	err := filepath.WalkDir(tabularDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".json") {
+			total++
+		}
+		return nil
+	})
+	return total, err
+}
+
 func renderSonarImages(tabularDir, sonarImagesDir string, size int, params *sonar.RenderParams) (rendered, skipped int, err error) {
+	total, err := countTabularFiles(tabularDir)
+	if err != nil {
+		return 0, 0, err
+	}
+	fmt.Printf("  found %d tabular file(s) to render\n", total)
+
 	walkErr := filepath.WalkDir(tabularDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -146,7 +169,7 @@ func renderSonarImages(tabularDir, sonarImagesDir string, size int, params *sona
 
 		rendered++
 		if rendered%100 == 0 {
-			fmt.Printf("  rendered %d images (%d skipped)\n", rendered, skipped)
+			fmt.Printf("  rendered %d/%d images (%d skipped)\n", rendered, total, skipped)
 		}
 		return nil
 	})

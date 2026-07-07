@@ -1,6 +1,6 @@
 {
-    "_label": "gen_range1p5",
-    "dbPerCount": 0.5,
+    "_label": "blackbg_dbpc0p2_calibrated",
+    "dbPerCount": 0.2,
     "dbWindow": 3000,
     "dbDisplayHeadroom": 200,
     "heatmapRangeSigmaFactor": 1.5,
@@ -9,9 +9,9 @@
     "colorStops": [
       {
         "t": 0.0,
-        "r": 2,
+        "r": 0,
         "g": 0,
-        "b": 127
+        "b": 0
       },
       {
         "t": 0.12,
