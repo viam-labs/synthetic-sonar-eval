@@ -1,4 +1,4 @@
-.PHONY: setup download render markers detect build
+.PHONY: setup download render markers detect-single detect-dir build
 
 OUTPUT      ?= output
 SEQUENCE_ID ?=
@@ -11,6 +11,7 @@ START       ?=
 END         ?=
 MODEL_DIR   ?= omni-detector-fcos-0_0_4
 IMAGE       ?=
+DIR         ?=
 CONFIDENCE  ?= 0.6
 DETECT      ?=
 
@@ -32,9 +33,13 @@ markers:
 		$(if $(ORG_ID),--org-id $(ORG_ID),) $(if $(START),--start $(START),) $(if $(END),--end $(END),) \
 		$(if $(DETECT),--detect --model-dir $(MODEL_DIR) --confidence $(CONFIDENCE),)
 
-detect:
-	@test -n "$(IMAGE)" || (echo "error: IMAGE is required  →  make detect IMAGE=<path>" && exit 1)
+detect-single:
+	@test -n "$(IMAGE)" || (echo "error: IMAGE is required  →  make detect-single IMAGE=<path>" && exit 1)
 	go run ./cmd/detect --model-dir $(MODEL_DIR) --image $(IMAGE) --confidence $(CONFIDENCE)
+
+detect-dir:
+	@test -n "$(DIR)" || (echo "error: DIR is required  →  make detect-dir DIR=<path>" && exit 1)
+	go run ./cmd/detect --model-dir $(MODEL_DIR) --image $(DIR) --confidence $(CONFIDENCE)
 
 build:
 	go build -o bin/download       ./cmd/download
