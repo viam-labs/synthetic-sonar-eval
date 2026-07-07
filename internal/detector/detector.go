@@ -150,6 +150,69 @@ func (d *Detector) DetectImage(src image.Image, minConfidence float32) ([]Detect
 	return d.decode(boxesT.GetData(), labelIdxT.GetData(), scoresT.GetData(), minConfidence), nil
 }
 
+// DetectBatch attempts to run inference on multiple images at once via a
+// single batched input tensor of shape [N, 3, H, W], instead of one image at
+// a time.
+//
+// This is a diagnostic/experimental method, not a working batching path: this
+// model's ONNX input has its batch dimension frozen at 1 rather than left
+// dynamic (confirmed via GetInputOutputInfo — it reports a literal 1, not a
+// symbolic dimension name), so onnxruntime is expected to reject any N != 1
+// at shape-validation time, before inference even runs. This method exists to
+// reproduce that failure directly from Go. For real throughput, run
+// Detect/DetectImage per image (optionally pipelined across goroutines).
+func (d *Detector) DetectBatch(images []image.Image, minConfidence float32) ([][]Detection, error) {
+	if len(images) == 0 {
+		return nil, nil
+	}
+
+	w, h := int(d.inputWidth), int(d.inputHeight)
+	planeSize := h * w
+	batch := make([]uint8, len(images)*3*planeSize)
+
+	for n, src := range images {
+		resized := image.NewRGBA(image.Rect(0, 0, w, h))
+		xdraw.BiLinear.Scale(resized, resized.Bounds(), src, src.Bounds(), xdraw.Src, nil)
+
+		base := n * 3 * planeSize
+		i := 0
+		for y := 0; y < h; y++ {
+			rowOff := resized.PixOffset(0, y)
+			row := resized.Pix[rowOff : rowOff+4*w]
+			for x := 0; x < w; x++ {
+				batch[base+0*planeSize+i] = row[4*x+0]
+				batch[base+1*planeSize+i] = row[4*x+1]
+				batch[base+2*planeSize+i] = row[4*x+2]
+				i++
+			}
+		}
+	}
+
+	input, err := ort.NewTensor(ort.NewShape(int64(len(images)), 3, d.inputHeight, d.inputWidth), batch)
+	if err != nil {
+		return nil, fmt.Errorf("build batched input tensor [%d,3,%d,%d]: %w", len(images), d.inputHeight, d.inputWidth, err)
+	}
+	defer input.Destroy()
+
+	outVals := make([]ort.Value, 3)
+	if err := d.session.Run([]ort.Value{input}, outVals); err != nil {
+		return nil, fmt.Errorf("run batched inference (N=%d): %w", len(images), err)
+	}
+	defer func() {
+		for _, v := range outVals {
+			if v != nil {
+				v.Destroy()
+			}
+		}
+	}()
+
+	// If we ever get here, the model actually does support batching after
+	// all — but there's no batch-index in the outputs to split detections
+	// back out per-image, so that's as far as this diagnostic goes.
+	return nil, fmt.Errorf("model unexpectedly accepted a batch of %d; output shapes were %v, %v, %v (per-image splitting not implemented)",
+		len(images), outVals[0].GetShape(), outVals[1].GetShape(), outVals[2].GetShape())
+}
+
 // preprocess resizes src to the model's fixed input size with bilinear
 // interpolation and packs it into a uint8 [1, 3, H, W] tensor (RGB, CHW).
 func (d *Detector) preprocess(src image.Image) (*ort.Tensor[uint8], error) {

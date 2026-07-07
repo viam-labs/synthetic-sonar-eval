@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"image/png"
-	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -53,7 +51,7 @@ func main() {
 	}
 
 	fmt.Println("Rendering sonar images...")
-	rendered, skipped, err := renderSonarImages(tabularRoot, sonarImagesDir, *size, renderParams)
+	rendered, skipped, err := sonar.RenderDirectory(tabularRoot, sonarImagesDir, *size, renderParams)
 	if err != nil {
 		log.Fatalf("render: %v", err)
 	}
@@ -70,110 +68,6 @@ func main() {
 		log.Printf("warning: pair: %v", err)
 	}
 	fmt.Println("Done.")
-}
-
-// tabularDataPoint is the minimal shape of each tabular JSON file.
-type tabularDataPoint struct {
-	ResourceName string          `json:"resourceName"`
-	TimeCaptured string          `json:"timeCaptured"`
-	Payload      json.RawMessage `json:"payload"`
-}
-
-// countTabularFiles counts the .json tabular files under tabularDir, so
-// renderSonarImages can report progress as "x/total" rather than just a
-// running count.
-func countTabularFiles(tabularDir string) (int, error) {
-	total := 0
-	err := filepath.WalkDir(tabularDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() && strings.HasSuffix(d.Name(), ".json") {
-			total++
-		}
-		return nil
-	})
-	return total, err
-}
-
-func renderSonarImages(tabularDir, sonarImagesDir string, size int, params *sonar.RenderParams) (rendered, skipped int, err error) {
-	total, err := countTabularFiles(tabularDir)
-	if err != nil {
-		return 0, 0, err
-	}
-	fmt.Printf("  found %d tabular file(s) to render\n", total)
-
-	walkErr := filepath.WalkDir(tabularDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
-			return nil
-		}
-
-		rel, err := filepath.Rel(tabularDir, path)
-		if err != nil {
-			return err
-		}
-		pngPath := filepath.Join(sonarImagesDir, strings.TrimSuffix(rel, ".json")+".png")
-
-		if _, err := os.Stat(pngPath); err == nil {
-			skipped++
-			return nil
-		}
-
-		data, err := os.ReadFile(path)
-		if err != nil {
-			log.Printf("warning: read %s: %v", path, err)
-			return nil
-		}
-
-		var dp tabularDataPoint
-		if err := json.Unmarshal(data, &dp); err != nil {
-			log.Printf("warning: parse %s: %v", path, err)
-			return nil
-		}
-
-		var payload struct {
-			Readings sonar.FanSampleGrid `json:"readings"`
-		}
-		if err := json.Unmarshal(dp.Payload, &payload); err != nil {
-			log.Printf("warning: parse payload %s: %v", path, err)
-			return nil
-		}
-		grid := &payload.Readings
-
-		if grid.NBeams == 0 || grid.NSamples == 0 {
-			log.Printf("warning: empty grid in %s, skipping", path)
-			return nil
-		}
-
-		img, err := sonar.RenderFanSampleGrid(grid, size, params)
-		if err != nil {
-			log.Printf("warning: render %s: %v", path, err)
-			return nil
-		}
-
-		if err := os.MkdirAll(filepath.Dir(pngPath), 0755); err != nil {
-			return err
-		}
-		f, err := os.Create(pngPath)
-		if err != nil {
-			return err
-		}
-		if encErr := png.Encode(f, img); encErr != nil {
-			f.Close()
-			return encErr
-		}
-		f.Close()
-
-		rendered++
-		if rendered%100 == 0 {
-			fmt.Printf("  rendered %d/%d images (%d skipped)\n", rendered, total, skipped)
-		}
-		return nil
-	})
-	return rendered, skipped, walkErr
 }
 
 // createVideos makes an MP4 for every image subdirectory under sonarImagesDir
