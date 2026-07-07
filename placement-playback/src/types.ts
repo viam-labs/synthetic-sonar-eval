@@ -19,3 +19,9 @@ export interface SonarFrame {
   mimeType: string;
   dataBase64: string;
 }
+
+export interface TimelineTrack {
+  label: string;
+  moments: number[]; // this source's frame timestamps, ascending
+  dotClassName: string;
+}

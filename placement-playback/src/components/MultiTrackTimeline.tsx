@@ -1,10 +1,5 @@
-import { useState, type MouseEvent as ReactMouseEvent } from 'react';
-
-export interface TimelineTrack {
-  label: string;
-  moments: number[]; // this source's frame timestamps, ascending
-  dotClassName: string;
-}
+import type { MouseEvent as ReactMouseEvent } from 'react';
+import type { TimelineTrack } from '../types';
 
 interface MultiTrackTimelineProps {
   tracks: TimelineTrack[];
@@ -12,18 +7,11 @@ interface MultiTrackTimelineProps {
   maxTs: number;
   currentTs: number;
   onSeek: (ts: number) => void;
-  /** Called with (start, end) when the user drag-selects a sub-range to zoom into. */
-  onZoom?: (start: number, end: number) => void;
 }
 
-// Below this drag distance, a mousedown+mouseup is treated as a click-to-seek instead of a
-// range selection — otherwise every ordinary click would be swallowed as a zero-width zoom.
-const DRAG_THRESHOLD_PX = 5;
-
-export function MultiTrackTimeline({ tracks, minTs, maxTs, currentTs, onSeek, onZoom }: MultiTrackTimelineProps) {
+export function MultiTrackTimeline({ tracks, minTs, maxTs, currentTs, onSeek }: MultiTrackTimelineProps) {
   const span = Math.max(maxTs - minTs, 1);
   const playheadPct = Math.min(100, Math.max(0, ((currentTs - minTs) / span) * 100));
-  const [dragPct, setDragPct] = useState<{ startPct: number; endPct: number } | null>(null);
 
   function handleMouseDown(e: ReactMouseEvent<HTMLDivElement>) {
     if (e.button !== 0) return;
@@ -32,28 +20,14 @@ export function MultiTrackTimeline({ tracks, minTs, maxTs, currentTs, onSeek, on
       const fraction = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
       return minTs + fraction * span;
     };
-    const pctOf = (ts: number) => ((ts - minTs) / span) * 100;
-    const startClientX = e.clientX;
-    const startTs = tsAt(startClientX);
-    setDragPct({ startPct: pctOf(startTs), endPct: pctOf(startTs) });
+    onSeek(tsAt(e.clientX));
 
     function onMove(ev: MouseEvent) {
-      const ts = tsAt(ev.clientX);
-      setDragPct({ startPct: pctOf(Math.min(startTs, ts)), endPct: pctOf(Math.max(startTs, ts)) });
+      onSeek(tsAt(ev.clientX));
     }
-    function onUp(ev: MouseEvent) {
+    function onUp() {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
-      setDragPct(null);
-      const draggedPx = Math.abs(ev.clientX - startClientX);
-      const endTs = tsAt(ev.clientX);
-      if (draggedPx < DRAG_THRESHOLD_PX || !onZoom) {
-        onSeek(endTs);
-        return;
-      }
-      const lo = Math.min(startTs, endTs);
-      const hi = Math.max(startTs, endTs);
-      if (hi - lo > 0) onZoom(lo, hi);
     }
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
@@ -67,7 +41,7 @@ export function MultiTrackTimeline({ tracks, minTs, maxTs, currentTs, onSeek, on
             {track.label}
           </span>
           <div
-            className="relative h-7 flex-1 cursor-crosshair rounded bg-slate-800/70 transition-colors select-none hover:bg-slate-800"
+            className="relative h-7 flex-1 cursor-pointer rounded bg-slate-800/70 transition-colors select-none hover:bg-slate-800"
             onMouseDown={handleMouseDown}
           >
             {track.moments.map((ts, i) => (
@@ -83,12 +57,6 @@ export function MultiTrackTimeline({ tracks, minTs, maxTs, currentTs, onSeek, on
               className="pointer-events-none absolute inset-y-0 w-0.5 bg-white shadow-[0_0_4px_rgba(255,255,255,0.8)]"
               style={{ left: `${playheadPct}%` }}
             />
-            {dragPct && (
-              <div
-                className="pointer-events-none absolute inset-y-0 rounded-sm bg-sky-400/25 ring-1 ring-sky-300/60"
-                style={{ left: `${dragPct.startPct}%`, width: `${dragPct.endPct - dragPct.startPct}%` }}
-              />
-            )}
           </div>
         </div>
       ))}
