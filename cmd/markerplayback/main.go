@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"image"
+	_ "image/jpeg"
 	"image/png"
 	"log"
 	"os"
@@ -28,6 +30,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"synthetic-sonar-eval/internal/detector"
 	"synthetic-sonar-eval/internal/sonar"
 )
 
@@ -51,18 +54,20 @@ type Reading struct {
 // ImageFrame is a single camera capture, embedded as base64 so the viewer can
 // load everything from the one dropped JSON file.
 type ImageFrame struct {
-	TS         int64  `json:"ts"`
-	MimeType   string `json:"mimeType"`
-	DataBase64 string `json:"dataBase64"`
+	TS         int64                `json:"ts"`
+	MimeType   string               `json:"mimeType"`
+	DataBase64 string               `json:"dataBase64"`
+	Detections []detector.Detection `json:"detections,omitempty"`
 }
 
 // SonarFrame is a single sonar ping, rendered to a heatmap PNG via
 // internal/sonar and embedded as base64 alongside the camera frames.
 type SonarFrame struct {
-	SensorName string `json:"sensorName"`
-	TS         int64  `json:"ts"`
-	MimeType   string `json:"mimeType"`
-	DataBase64 string `json:"dataBase64"`
+	SensorName string               `json:"sensorName"`
+	TS         int64                `json:"ts"`
+	MimeType   string               `json:"mimeType"`
+	DataBase64 string               `json:"dataBase64"`
+	Detections []detector.Detection `json:"detections,omitempty"`
 }
 
 // buildPipeline mirrors the requested MQL shape: a single $match stage on the
@@ -260,6 +265,7 @@ func fetchImageMetadata(
 			break
 		}
 		out = append(out, resp.Data...)
+		fmt.Printf("  listed %d image(s) so far...\n", len(out))
 		if maxResults > 0 && uint64(len(out)) >= maxResults {
 			out = out[:maxResults]
 			break
@@ -274,7 +280,8 @@ func fetchImageMetadata(
 
 // fetchImages lists matching camera captures, then downloads their bytes via
 // BinaryDataByIDs in small batches (BinaryDataByFilter can't return bytes for
-// more than one document per call).
+// more than one document per call). Detection is a separate later pass (see
+// detectImageFrames) — this only fetches.
 func fetchImages(
 	ctx context.Context, client datapb.DataServiceClient, filter *datapb.Filter, pageSize, maxResults uint64,
 ) ([]ImageFrame, error) {
@@ -282,6 +289,10 @@ func fetchImages(
 	if err != nil {
 		return nil, err
 	}
+	if len(metas) == 0 {
+		return nil, nil
+	}
+	fmt.Printf("  downloading %d image(s)...\n", len(metas))
 
 	frames := make([]ImageFrame, 0, len(metas))
 	for i := 0; i < len(metas); i += binaryDataIDBatchSize {
@@ -313,10 +324,66 @@ func fetchImages(
 				DataBase64: base64.StdEncoding.EncodeToString(d.Binary),
 			})
 		}
+		fmt.Printf("  downloaded %d/%d image(s)\n", len(frames), len(metas))
 	}
 
 	sort.Slice(frames, func(i, j int) bool { return frames[i].TS < frames[j].TS })
 	return frames, nil
+}
+
+// detectOnBytes decodes raw image bytes and runs the detector on them,
+// logging a warning and returning nil (not failing the whole run) if the
+// bytes can't be decoded as an image.
+func detectOnBytes(det *detector.Detector, raw []byte, label string, minConfidence float32) []detector.Detection {
+	img, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		log.Printf("warning: detect on %s: decode image: %v", label, err)
+		return nil
+	}
+	dets, err := det.DetectImage(img, minConfidence)
+	if err != nil {
+		log.Printf("warning: detect on %s: %v", label, err)
+		return nil
+	}
+	return dets
+}
+
+// detectImageFrames runs the detector over already-fetched screen images'
+// base64-encoded bytes, in place, logging progress for every image — this is
+// typically the slowest stage, so progress is reported one image at a time
+// rather than batched.
+func detectImageFrames(det *detector.Detector, minConfidence float32, images []ImageFrame) {
+	if det == nil || len(images) == 0 {
+		return
+	}
+	fmt.Printf("  running detection on %d screen image(s)...\n", len(images))
+	for i := range images {
+		raw, err := base64.StdEncoding.DecodeString(images[i].DataBase64)
+		if err != nil {
+			log.Printf("warning: detect on screen image %d: decode base64: %v", i, err)
+			continue
+		}
+		images[i].Detections = detectOnBytes(det, raw, fmt.Sprintf("screen image %d", i), minConfidence)
+		fmt.Printf("  detected %d/%d screen image(s)\n", i+1, len(images))
+	}
+}
+
+// detectSonarFrames runs the detector over already-rendered sonar frames'
+// base64-encoded PNG bytes, in place, logging progress for every frame.
+func detectSonarFrames(det *detector.Detector, minConfidence float32, frames []SonarFrame) {
+	if det == nil || len(frames) == 0 {
+		return
+	}
+	fmt.Printf("  running detection on %d sonar frame(s)...\n", len(frames))
+	for i := range frames {
+		raw, err := base64.StdEncoding.DecodeString(frames[i].DataBase64)
+		if err != nil {
+			log.Printf("warning: detect on %s frame %d: decode base64: %v", frames[i].SensorName, i, err)
+			continue
+		}
+		frames[i].Detections = detectOnBytes(det, raw, fmt.Sprintf("%s frame %d", frames[i].SensorName, i), minConfidence)
+		fmt.Printf("  detected %d/%d sonar frame(s)\n", i+1, len(frames))
+	}
 }
 
 // extractFanSampleGrid pulls the sonar ping payload out of a raw
@@ -350,7 +417,8 @@ func extractFanSampleGrid(doc map[string]interface{}) (*sonar.FanSampleGrid, boo
 
 // renderOneSonarDoc decodes a single TabularDataByMQL raw document into a
 // FanSampleGrid and renders it, returning ok=false (not an error) for
-// documents that can't be turned into a frame.
+// documents that can't be turned into a frame. Detection is a separate later
+// pass (see detectSonarFrames) — this only renders.
 func renderOneSonarDoc(raw []byte, sensorName string, size int) (SonarFrame, bool) {
 	var doc map[string]interface{}
 	if err := bson.Unmarshal(raw, &doc); err != nil {
@@ -439,7 +507,7 @@ func fetchSonarFrames(
 	var frames []SonarFrame
 	for _, sensorName := range sensorNames {
 		found, failed := 0, 0
-		for _, day := range days {
+		for dayIdx, day := range days {
 			pipeline := buildCaptureDayPipeline(locationID, robotID, partID, sensorName, componentType, methodName, day)
 			mqlBinary, err := queryToBinary(pipeline)
 			if err != nil {
@@ -467,6 +535,8 @@ func fetchSonarFrames(
 				frames = append(frames, frame)
 				found++
 			}
+			fmt.Printf("  %s: day %d/%d (%s) — %d frame(s) rendered so far\n",
+				sensorName, dayIdx+1, len(days), day.Format("2006-01-02"), found)
 		}
 		if failed > 0 {
 			log.Printf("warning: %s: %d/%d day quer(y/ies) failed (timeout or error) and were skipped", sensorName, failed, len(days))
@@ -489,7 +559,13 @@ func main() {
 	start := flag.String("start", "", "only include readings at/after this RFC3339 time_received (required)")
 	end := flag.String("end", "", "only include readings at/before this RFC3339 time_received (required)")
 	imagePageSize := flag.Uint("image-page-size", 50, "page size for image pagination")
+	imageWindowPad := flag.Duration("image-window-pad", 5*time.Minute,
+		"padding applied around the placed-marker span when scoping the screen image fetch")
 	outputDir := flag.String("output", "output", "output directory")
+	runDetection := flag.Bool("detect", false, "run object detection (fish/triangle) on fetched images/sonar frames and attach the results (opt-in; off by default)")
+	modelDir := flag.String("model-dir", "omni-detector-fcos-0_0_4", "directory containing model.onnx + labels.txt for detection")
+	confidence := flag.Float64("confidence", 0.6, "minimum detection confidence to record")
+	onnxLibPath := flag.String("onnxruntime-lib", "", "path to libonnxruntime.{dylib,so}; defaults to $ONNXRUNTIME_LIB_PATH or common install locations")
 	flag.Parse()
 
 	if *authToken == "" {
@@ -551,6 +627,7 @@ func main() {
 	}
 	defer conn.Close()
 
+	fmt.Println("Fetching marker readings...")
 	client := datapb.NewDataServiceClient(conn)
 	resp, err := client.TabularDataByMQL(ctx, &datapb.TabularDataByMQLRequest{
 		OrganizationId: *orgID,
@@ -585,12 +662,44 @@ func main() {
 		log.Fatalf("mkdir %s: %v", dir, err)
 	}
 
+	// Screen images are captured continuously by camera-save-predictions and can
+	// vastly outnumber what's relevant here (that resource alone has held 1M+
+	// captures). --start/--end only bound how far back the marker query itself is
+	// allowed to look, so scope the screen image fetch instead to the actual
+	// placed-marker span (real and synthetic placements alike), padded a bit on
+	// each side since captures land "around" — not exactly at — marker placement.
+	imageStart, imageEnd := *start, *end
+	if len(readings) > 0 {
+		minTS, maxTS := readings[0].TS, readings[0].TS
+		for _, r := range readings {
+			if r.TS < minTS {
+				minTS = r.TS
+			}
+			if r.TS > maxTS {
+				maxTS = r.TS
+			}
+		}
+		padStart := time.UnixMilli(minTS).Add(-*imageWindowPad)
+		padEnd := time.UnixMilli(maxTS).Add(*imageWindowPad)
+		if padStart.Before(startTime) {
+			padStart = startTime
+		}
+		if padEnd.After(endTime) {
+			padEnd = endTime
+		}
+		imageStart, imageEnd = padStart.UTC().Format(time.RFC3339), padEnd.UTC().Format(time.RFC3339)
+		log.Printf("scoping screen image fetch to the placed-marker span %s to %s (padded %s each side)",
+			imageStart, imageEnd, *imageWindowPad)
+	} else {
+		log.Printf("no readings found; scoping screen images to the full --start/--end window")
+	}
+
 	var images []ImageFrame
-	startTS, err := parseRFC3339(*start)
+	startTS, err := parseRFC3339(imageStart)
 	if err != nil {
 		log.Fatalf("start: %v", err)
 	}
-	endTS, err := parseRFC3339(*end)
+	endTS, err := parseRFC3339(imageEnd)
 	if err != nil {
 		log.Fatalf("end: %v", err)
 	}
@@ -606,6 +715,7 @@ func main() {
 	}
 
 	// 2. get the images for when the camera-save-predictions saves images (which happens around when the screen marker is placed)
+	fmt.Println("Fetching screen images...")
 	images, err = fetchImages(ctx, client, imageFilter, uint64(*imagePageSize), 0)
 	if err != nil {
 		log.Fatalf("BinaryDataByFilter: %v", err)
@@ -645,6 +755,7 @@ func main() {
 	}
 
 	// 3. get the sonar frames for the sonar sensors (horizontal-h-sensor, horizontal-h3-1-sensor, horizontal-h3-2-sensor, horizontal-h3-3-sensor) and render them to PNGs
+	fmt.Println("Fetching and rendering sonar frames...")
 	sonarFrames, err = fetchSonarFrames(
 		ctx, client, *orgID, locationID, robotID, *partID, sensorNames, "rdk:component:sensor", "Readings",
 		*start, *end, 500,
@@ -671,7 +782,30 @@ func main() {
 		}
 	}
 
-	// 4. write the readings, images, and sonar frames to a JSON file for the placement-playback viewer to consume
+	// 4. now that everything is fetched and rendered, optionally run the fish
+	// detector over all of it (opt-in via --detect). A missing onnxruntime lib or
+	// model is treated as a soft failure: the rest of the pull still succeeds,
+	// just without detections.
+	var det *detector.Detector
+	if *runDetection {
+		lib, err := detector.ResolveLibPath(*onnxLibPath)
+		if err != nil {
+			log.Printf("warning: skipping detection: %v", err)
+		} else if det, err = detector.New(*modelDir, lib); err != nil {
+			log.Printf("warning: skipping detection: load model from %s: %v", *modelDir, err)
+			det = nil
+		} else {
+			defer det.Close()
+		}
+	}
+	if det != nil {
+		fmt.Println("Running ML detection...")
+		detectConfidence := float32(*confidence)
+		detectImageFrames(det, detectConfidence, images)
+		detectSonarFrames(det, detectConfidence, sonarFrames)
+	}
+
+	// 5. write the readings, images, and sonar frames to a JSON file for the placement-playback viewer to consume
 	path := filepath.Join(dir, "readings.json")
 	data, err := json.MarshalIndent(map[string]any{"readings": readings, "images": images, "sonarFrames": sonarFrames}, "", "  ")
 	if err != nil {
