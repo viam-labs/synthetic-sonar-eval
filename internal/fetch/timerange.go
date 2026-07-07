@@ -14,6 +14,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	datapb "go.viam.com/api/app/data/v1"
 	apppb "go.viam.com/api/app/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -233,13 +235,52 @@ func FetchImagesTimeRange(
 	return nil
 }
 
+// sonarResultLimit is a generous cap on a single leaf query's result size —
+// mostly a safety net; the real defense against the server's "result set is
+// too large" guard is windowStart/windowEnd bisection in fetchSonarWindow
+// below, since that guard triggers on the total matched-document count
+// itself, before $skip/$limit ever get a chance to slice it.
+const sonarResultLimit = 5000
+
+// minSonarBisectWindow is the smallest time.Duration fetchSonarWindow will
+// still bisect on a "too large" error. Below this, a slice that's still too
+// large is logged and given up on rather than split forever.
+const minSonarBisectWindow = 30 * time.Second
+
+// shouldBisectWindow reports whether err is one this package can work around
+// by narrowing the query window and retrying, rather than a hard failure to
+// just log and skip:
+//   - "result set is too large; try adding limits to your query using
+//     $limit and $skip" — the server's guard on total matched-document count,
+//     which triggers before $limit/$skip ever get a chance to slice it.
+//   - DeadlineExceeded ("query timed out") — a server-side query timeout,
+//     which a smaller (cheaper to scan) window is also likely to fix.
+//
+// Other errors (network blips, auth failures, ...) aren't retried this way.
+func shouldBisectWindow(err error) bool {
+	if err == nil {
+		return false
+	}
+	if strings.Contains(err.Error(), "result set is too large") {
+		return true
+	}
+	if status.Code(err) == codes.DeadlineExceeded {
+		return true
+	}
+	return false
+}
+
 // buildCaptureDayPipeline matches on capture_day (an indexed day-bucket
-// field) instead of a time_received range via $expr, which isn't
+// field) instead of a bare time_received range via $expr, which isn't
 // index-backed and can time out once a sensor has more than a few thousand
-// matching documents (some sonar sensors here have 250k+ pings across just a
-// few days).
+// matching documents across the *whole* multi-day query window (some sonar
+// sensors here have 250k+ pings across just a few days). windowStart/
+// windowEnd additionally bound time_received via $expr (same pattern as
+// buildPipeline) on top of that already-cheap, indexed day-bucket match, so
+// the matched set is only what's actually requested, not the entire day.
 func buildCaptureDayPipeline(
 	locationID, robotID, partID, componentName, componentType, methodName string, day time.Time,
+	windowStart, windowEnd string,
 ) []map[string]interface{} {
 	match := map[string]interface{}{
 		"location_id":    locationID,
@@ -250,7 +291,30 @@ func buildCaptureDayPipeline(
 		"method_name":    methodName,
 		"capture_day":    day,
 	}
-	return []map[string]interface{}{{"$match": match}}
+
+	var bounds []interface{}
+	if windowStart != "" {
+		bounds = append(bounds, map[string]interface{}{
+			"$gte": []interface{}{"$time_received", map[string]interface{}{"$toDate": windowStart}},
+		})
+	}
+	if windowEnd != "" {
+		bounds = append(bounds, map[string]interface{}{
+			"$lte": []interface{}{"$time_received", map[string]interface{}{"$toDate": windowEnd}},
+		})
+	}
+	switch len(bounds) {
+	case 0:
+	case 1:
+		match["$expr"] = bounds[0]
+	default:
+		match["$expr"] = map[string]interface{}{"$and": bounds}
+	}
+
+	return []map[string]interface{}{
+		{"$match": match},
+		{"$limit": sonarResultLimit},
+	}
 }
 
 // extractReadingsPayload pulls the raw sonar reading payload out of a raw
@@ -316,59 +380,23 @@ func FetchSonarTimeRange(
 
 		found, failed := 0, 0
 		for dayIdx, day := range days {
-			pipeline := buildCaptureDayPipeline(locationID, robotID, partID, sensorName, "rdk:component:sensor", "Readings", day)
-			mqlBinary, err := QueryToBinary(pipeline)
-			if err != nil {
-				return fmt.Errorf("%s: build query: %w", sensorName, err)
+			// Intersect the requested [start, end] with this calendar day's
+			// bounds, since capture_day matches the whole day but we only want
+			// what's actually in range.
+			dayLowerBound := day
+			if startTime.After(dayLowerBound) {
+				dayLowerBound = startTime
+			}
+			dayUpperBound := day.AddDate(0, 0, 1)
+			if endTime.Before(dayUpperBound) {
+				dayUpperBound = endTime
 			}
 
-			// A day can still time out server-side on rare occasions — treat that as a
-			// soft failure (skip the day) rather than aborting the whole run over one
-			// slow query.
-			resp, err := client.TabularDataByMQL(ctx, &datapb.TabularDataByMQLRequest{
-				OrganizationId: orgID,
-				MqlBinary:      mqlBinary,
-			})
+			n, err := fetchSonarWindow(ctx, client, orgID, locationID, robotID, partID, sensorName, sensorDir, day, dayLowerBound, dayUpperBound, m)
+			found += n
 			if err != nil {
-				log.Printf("error: %s: TabularDataByMQL: %v", sensorName, err)
+				log.Printf("error: %s: %v", sensorName, err)
 				failed++
-				continue
-			}
-
-			var pageEntries []ManifestEntry
-			for _, raw := range resp.RawData {
-				var doc map[string]interface{}
-				if err := bson.Unmarshal(raw, &doc); err != nil {
-					continue
-				}
-				payload, timeCaptured, ok := extractReadingsPayload(doc)
-				if !ok {
-					continue
-				}
-
-				dp := TabularDataPoint{
-					ResourceName: sensorName,
-					TimeCaptured: timeCaptured.Format(time.RFC3339Nano),
-					Payload:      payload,
-				}
-				data, err := json.MarshalIndent(dp, "", "  ")
-				if err != nil {
-					continue
-				}
-				path := filepath.Join(sensorDir, SanitizeTimestamp(dp.TimeCaptured)+".json")
-				if err := os.WriteFile(path, data, 0644); err != nil {
-					return fmt.Errorf("write %s: %w", path, err)
-				}
-				pageEntries = append(pageEntries, ManifestEntry{
-					Type:         "tabular",
-					Path:         path,
-					TimeCaptured: dp.TimeCaptured,
-					ResourceName: sensorName,
-				})
-				found++
-			}
-			if err := m.Add(pageEntries); err != nil {
-				log.Printf("warning: manifest flush failed: %v", err)
 			}
 			fmt.Printf("  %s: day %d/%d (%s) — %d record(s) so far\n",
 				sensorName, dayIdx+1, len(days), day.Format("2006-01-02"), found)
@@ -380,4 +408,78 @@ func FetchSonarTimeRange(
 	}
 
 	return nil
+}
+
+// fetchSonarWindow queries [windowStart, windowEnd) within a single calendar
+// day for one sensor, writing any resulting readings to disk and recording
+// them in m. If the server rejects the query as "too large" and the window
+// is still wider than minSonarBisectWindow, it splits the window in half and
+// retries each half recursively — the guard triggers on the total matched
+// count before $limit ever applies, so narrowing the query is the only way
+// around it. Returns the number of readings written; a non-nil error means
+// at least one leaf window still failed (or was too large to split further),
+// but any readings from other leaves are still returned/written.
+func fetchSonarWindow(
+	ctx context.Context, client datapb.DataServiceClient, orgID, locationID, robotID, partID, sensorName, sensorDir string,
+	day, windowStart, windowEnd time.Time, m *Manifest,
+) (int, error) {
+	pipeline := buildCaptureDayPipeline(locationID, robotID, partID, sensorName, "rdk:component:sensor", "Readings", day,
+		windowStart.UTC().Format(time.RFC3339Nano), windowEnd.UTC().Format(time.RFC3339Nano))
+	mqlBinary, err := QueryToBinary(pipeline)
+	if err != nil {
+		return 0, fmt.Errorf("build query: %w", err)
+	}
+
+	resp, err := client.TabularDataByMQL(ctx, &datapb.TabularDataByMQLRequest{
+		OrganizationId: orgID,
+		MqlBinary:      mqlBinary,
+	})
+	if err != nil {
+		if shouldBisectWindow(err) && windowEnd.Sub(windowStart) > minSonarBisectWindow {
+			mid := windowStart.Add(windowEnd.Sub(windowStart) / 2)
+			left, leftErr := fetchSonarWindow(ctx, client, orgID, locationID, robotID, partID, sensorName, sensorDir, day, windowStart, mid, m)
+			right, rightErr := fetchSonarWindow(ctx, client, orgID, locationID, robotID, partID, sensorName, sensorDir, day, mid, windowEnd, m)
+			if leftErr != nil {
+				return left + right, leftErr
+			}
+			return left + right, rightErr
+		}
+		return 0, fmt.Errorf("TabularDataByMQL (%s to %s): %w", windowStart.Format(time.RFC3339), windowEnd.Format(time.RFC3339), err)
+	}
+
+	var pageEntries []ManifestEntry
+	for _, raw := range resp.RawData {
+		var doc map[string]interface{}
+		if err := bson.Unmarshal(raw, &doc); err != nil {
+			continue
+		}
+		payload, timeCaptured, ok := extractReadingsPayload(doc)
+		if !ok {
+			continue
+		}
+
+		dp := TabularDataPoint{
+			ResourceName: sensorName,
+			TimeCaptured: timeCaptured.Format(time.RFC3339Nano),
+			Payload:      payload,
+		}
+		data, err := json.MarshalIndent(dp, "", "  ")
+		if err != nil {
+			continue
+		}
+		path := filepath.Join(sensorDir, SanitizeTimestamp(dp.TimeCaptured)+".json")
+		if err := os.WriteFile(path, data, 0644); err != nil {
+			return len(pageEntries), fmt.Errorf("write %s: %w", path, err)
+		}
+		pageEntries = append(pageEntries, ManifestEntry{
+			Type:         "tabular",
+			Path:         path,
+			TimeCaptured: dp.TimeCaptured,
+			ResourceName: sensorName,
+		})
+	}
+	if err := m.Add(pageEntries); err != nil {
+		log.Printf("warning: manifest flush failed: %v", err)
+	}
+	return len(pageEntries), nil
 }
