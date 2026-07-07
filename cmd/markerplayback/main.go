@@ -21,8 +21,8 @@ import (
 	"github.com/joho/godotenv"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	apppb "go.viam.com/api/app/v1"
 	datapb "go.viam.com/api/app/data/v1"
+	apppb "go.viam.com/api/app/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
@@ -32,6 +32,11 @@ import (
 )
 
 const viamEndpoint = "app.viam.com:443"
+
+// maxQueryWindow caps how much history a single run can pull, since the
+// sonar/image resources here can hold vastly more data than is practical to
+// render in one go (some sensors have 250k+ pings across just a few days).
+const maxQueryWindow = 3 * 24 * time.Hour
 
 // Reading is the flat shape consumed by the placement-playback viewer.
 type Reading struct {
@@ -62,12 +67,12 @@ type SonarFrame struct {
 
 // buildPipeline mirrors the requested MQL shape: a single $match stage on the
 // resource identity fields, plus an optional $expr time_received bound.
-func buildPipeline(partID, componentName, componentType, methodName, start, end string) []map[string]interface{} {
+func buildPipeline(partID, start, end string) []map[string]interface{} {
 	match := map[string]interface{}{
 		"part_id":        partID,
-		"component_name": componentName,
-		"component_type": componentType,
-		"method_name":    methodName,
+		"component_name": "placemarker-synth-ai",
+		"component_type": "rdk:component:sensor",
+		"method_name":    "Readings",
 	}
 
 	var bounds []interface{}
@@ -346,7 +351,7 @@ func extractFanSampleGrid(doc map[string]interface{}) (*sonar.FanSampleGrid, boo
 // renderOneSonarDoc decodes a single TabularDataByMQL raw document into a
 // FanSampleGrid and renders it, returning ok=false (not an error) for
 // documents that can't be turned into a frame.
-func renderOneSonarDoc(raw []byte, sensorName string, size int, params *sonar.RenderParams) (SonarFrame, bool) {
+func renderOneSonarDoc(raw []byte, sensorName string, size int) (SonarFrame, bool) {
 	var doc map[string]interface{}
 	if err := bson.Unmarshal(raw, &doc); err != nil {
 		return SonarFrame{}, false
@@ -359,7 +364,7 @@ func renderOneSonarDoc(raw []byte, sensorName string, size int, params *sonar.Re
 	if !ok {
 		return SonarFrame{}, false
 	}
-	img, err := sonar.RenderFanSampleGrid(grid, size, params)
+	img, err := sonar.RenderFanSampleGrid(grid, size, nil)
 	if err != nil {
 		return SonarFrame{}, false
 	}
@@ -393,7 +398,7 @@ func resolveRobotAndLocation(ctx context.Context, client apppb.AppServiceClient,
 // matching documents (some sonar sensors here have 250k+ pings across just a
 // few days).
 func buildCaptureDayPipeline(
-	locationID, robotID, partID, componentName, componentType, methodName string, day time.Time, limit uint,
+	locationID, robotID, partID, componentName, componentType, methodName string, day time.Time,
 ) []map[string]interface{} {
 	match := map[string]interface{}{
 		"location_id":    locationID,
@@ -405,9 +410,6 @@ func buildCaptureDayPipeline(
 		"capture_day":    day,
 	}
 	pipeline := []map[string]interface{}{{"$match": match}}
-	if limit > 0 {
-		pipeline = append(pipeline, map[string]interface{}{"$limit": limit})
-	}
 	return pipeline
 }
 
@@ -416,8 +418,7 @@ func buildCaptureDayPipeline(
 // heatmap PNG.
 func fetchSonarFrames(
 	ctx context.Context, client datapb.DataServiceClient, orgID, locationID, robotID, partID string,
-	sensorNames []string, componentType, methodName string, start, end string,
-	limit uint, size int, params *sonar.RenderParams,
+	sensorNames []string, componentType, methodName string, start, end string, size int,
 ) ([]SonarFrame, error) {
 	startTime, err := time.Parse(time.RFC3339, start)
 	if err != nil {
@@ -435,19 +436,11 @@ func fetchSonarFrames(
 		days = append(days, d)
 	}
 
-	if limit == 0 {
-		limit = 1
-	}
-	perDay := (limit + uint(len(days)) - 1) / uint(len(days)) // ceil
-	if perDay == 0 {
-		perDay = 1
-	}
-
 	var frames []SonarFrame
 	for _, sensorName := range sensorNames {
 		found, failed := 0, 0
 		for _, day := range days {
-			pipeline := buildCaptureDayPipeline(locationID, robotID, partID, sensorName, componentType, methodName, day, perDay)
+			pipeline := buildCaptureDayPipeline(locationID, robotID, partID, sensorName, componentType, methodName, day)
 			mqlBinary, err := queryToBinary(pipeline)
 			if err != nil {
 				return nil, fmt.Errorf("%s: build query: %w", sensorName, err)
@@ -461,12 +454,13 @@ func fetchSonarFrames(
 				MqlBinary:      mqlBinary,
 			})
 			if err != nil {
+				log.Printf("error: %s: TabularDataByMQL: %v", sensorName, err)
 				failed++
 				continue
 			}
 
 			for _, raw := range resp.RawData {
-				frame, ok := renderOneSonarDoc(raw, sensorName, size, params)
+				frame, ok := renderOneSonarDoc(raw, sensorName, size)
 				if !ok {
 					continue
 				}
@@ -492,27 +486,9 @@ func main() {
 	// Default deliberately omitted from the flag registration (and thus from --help output) so a
 	// live token never gets echoed to the terminal; VIAM_AUTH_TOKEN is applied as a fallback below.
 	authToken := flag.String("token", "", "auth token (or set VIAM_AUTH_TOKEN in .env)")
-	componentName := flag.String("component-name", "placemarker-synth-ai", "component name to match")
-	componentType := flag.String("component-type", "rdk:component:sensor", "component type to match")
-	methodName := flag.String("method-name", "Readings", "method name to match")
-	start := flag.String("start", "", "only include readings at/after this RFC3339 time_received (optional)")
-	end := flag.String("end", "", "only include readings at/before this RFC3339 time_received (optional)")
-	limit := flag.Uint("limit", 0, "cap the number of matched documents via $limit (0 = no cap)")
-	imageComponentName := flag.String("image-component-name", "camera-save-predictions", "component name to match for images")
-	imageComponentType := flag.String("image-component-type", "rdk:component:camera", "component type to match for images")
-	imageMethodName := flag.String("image-method-name", "", "method name to match for images (optional)")
+	start := flag.String("start", "", "only include readings at/after this RFC3339 time_received (required)")
+	end := flag.String("end", "", "only include readings at/before this RFC3339 time_received (required)")
 	imagePageSize := flag.Uint("image-page-size", 50, "page size for image pagination")
-	imageLimit := flag.Uint("image-limit", 1000, "cap the number of images fetched (0 = no cap)")
-	skipImages := flag.Bool("skip-images", false, "skip fetching camera images")
-	sonarComponentNames := flag.String("sonar-component-names",
-		"horizontal-h-sensor,horizontal-h3-1-sensor,horizontal-h3-2-sensor,horizontal-h3-3-sensor",
-		"comma-separated sonar sensor component names to render")
-	sonarComponentType := flag.String("sonar-component-type", "rdk:component:sensor", "component type to match for sonar")
-	sonarMethodName := flag.String("sonar-method-name", "Readings", "method name to match for sonar")
-	sonarLimit := flag.Uint("sonar-limit", 60, "number of evenly time-spaced pings to render per sonar sensor")
-	sonarSize := flag.Int("sonar-size", 500, "rendered sonar heatmap size in pixels")
-	sonarParamsFile := flag.String("sonar-params", "", "optional JSON file with sonar render params (same shape as cmd/render --params)")
-	skipSonar := flag.Bool("skip-sonar", false, "skip fetching and rendering sonar data")
 	outputDir := flag.String("output", "output", "output directory")
 	flag.Parse()
 
@@ -533,11 +509,32 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: auth token required (set VIAM_AUTH_TOKEN in .env or use --token)")
 		os.Exit(1)
 	}
-
-	pipeline := buildPipeline(*partID, *componentName, *componentType, *methodName, *start, *end)
-	if *limit > 0 {
-		pipeline = append(pipeline, map[string]interface{}{"$limit": *limit})
+	if *start == "" {
+		fmt.Fprintln(os.Stderr, "error: --start is required")
+		os.Exit(1)
 	}
+	if *end == "" {
+		fmt.Fprintln(os.Stderr, "error: --end is required")
+		os.Exit(1)
+	}
+	startTime, err := time.Parse(time.RFC3339, *start)
+	if err != nil {
+		log.Fatalf("parse --start: %v", err)
+	}
+	endTime, err := time.Parse(time.RFC3339, *end)
+	if err != nil {
+		log.Fatalf("parse --end: %v", err)
+	}
+	if endTime.Before(startTime) {
+		fmt.Fprintln(os.Stderr, "error: --end must not be before --start")
+		os.Exit(1)
+	}
+	if endTime.Sub(startTime) > maxQueryWindow {
+		fmt.Fprintf(os.Stderr, "error: --start/--end window must be at most %s (got %s)\n", maxQueryWindow, endTime.Sub(startTime))
+		os.Exit(1)
+	}
+
+	pipeline := buildPipeline(*partID, *start, *end)
 	mqlBinary, err := queryToBinary(pipeline)
 	if err != nil {
 		log.Fatalf("build query: %v", err)
@@ -562,8 +559,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("TabularDataByMQL: %v", err)
 	}
-	fmt.Printf("matched %d documents\n", len(resp.RawData))
+	fmt.Printf("matched %d documents for synthetic and screen marker placements\n", len(resp.RawData))
 
+	// 1. get the TabularDataByMQL for silent mode markers placed (screen based and synthetic)
 	readings := make([]Reading, 0, len(resp.RawData))
 	skipped := 0
 	for i, raw := range resp.RawData {
@@ -587,141 +585,93 @@ func main() {
 		log.Fatalf("mkdir %s: %v", dir, err)
 	}
 
-	// Default the image/sonar window to the pulled readings' span rather than leaving it
-	// unbounded — these resources can hold vastly more historical data than what's
-	// relevant to this part's readings (the camera alone has held 1M+ total captures).
-	effectiveStart, effectiveEnd := *start, *end
-	if effectiveStart == "" && effectiveEnd == "" && len(readings) > 0 {
-		minTS, maxTS := readings[0].TS, readings[0].TS
-		for _, r := range readings {
-			if r.TS < minTS {
-				minTS = r.TS
-			}
-			if r.TS > maxTS {
-				maxTS = r.TS
-			}
-		}
-		effectiveStart = time.UnixMilli(minTS).UTC().Format(time.RFC3339)
-		effectiveEnd = time.UnixMilli(maxTS).UTC().Format(time.RFC3339)
-		log.Printf("no --start/--end given; scoping images/sonar to the readings' time span (%s to %s)",
-			effectiveStart, effectiveEnd)
+	var images []ImageFrame
+	startTS, err := parseRFC3339(*start)
+	if err != nil {
+		log.Fatalf("start: %v", err)
+	}
+	endTS, err := parseRFC3339(*end)
+	if err != nil {
+		log.Fatalf("end: %v", err)
 	}
 
-	var images []ImageFrame
-	if !*skipImages {
-		startTS, err := parseRFC3339(effectiveStart)
-		if err != nil {
-			log.Fatalf("start: %v", err)
-		}
-		endTS, err := parseRFC3339(effectiveEnd)
-		if err != nil {
-			log.Fatalf("end: %v", err)
-		}
+	imageFilter := &datapb.Filter{
+		PartId:          *partID,
+		OrganizationIds: []string{*orgID},
+		ComponentName:   "camera-save-predictions",
+		ComponentType:   "rdk:component:camera",
+	}
+	if startTS != nil || endTS != nil {
+		imageFilter.Interval = &datapb.CaptureInterval{Start: startTS, End: endTS}
+	}
 
-		imageFilter := &datapb.Filter{
-			PartId:          *partID,
-			OrganizationIds: []string{*orgID},
-			ComponentName:   *imageComponentName,
-			ComponentType:   *imageComponentType,
-		}
-		if *imageMethodName != "" {
-			imageFilter.Method = *imageMethodName
-		}
-		if startTS != nil || endTS != nil {
-			imageFilter.Interval = &datapb.CaptureInterval{Start: startTS, End: endTS}
-		}
+	// 2. get the images for when the camera-save-predictions saves images (which happens around when the screen marker is placed)
+	images, err = fetchImages(ctx, client, imageFilter, uint64(*imagePageSize), 0)
+	if err != nil {
+		log.Fatalf("BinaryDataByFilter: %v", err)
+	}
+	fmt.Printf("matched %d image(s)\n", len(images))
 
-		totalImages, err := countImages(ctx, client, imageFilter)
-		if err != nil {
-			log.Fatalf("count images: %v", err)
+	if len(images) > 0 {
+		imagesDir := filepath.Join(dir, "images")
+		if err := os.MkdirAll(imagesDir, 0755); err != nil {
+			log.Fatalf("mkdir %s: %v", imagesDir, err)
 		}
-		if *imageLimit > 0 && totalImages > uint64(*imageLimit) {
-			log.Printf("warning: %d image(s) matched but only fetching the first %d (--image-limit)", totalImages, *imageLimit)
-		}
-
-		images, err = fetchImages(ctx, client, imageFilter, uint64(*imagePageSize), uint64(*imageLimit))
-		if err != nil {
-			log.Fatalf("BinaryDataByFilter: %v", err)
-		}
-		fmt.Printf("matched %d image(s)\n", len(images))
-
-		if len(images) > 0 {
-			imagesDir := filepath.Join(dir, "images")
-			if err := os.MkdirAll(imagesDir, 0755); err != nil {
-				log.Fatalf("mkdir %s: %v", imagesDir, err)
+		for _, img := range images {
+			raw, err := base64.StdEncoding.DecodeString(img.DataBase64)
+			if err != nil {
+				log.Fatalf("decode image at ts %d: %v", img.TS, err)
 			}
-			for _, img := range images {
-				raw, err := base64.StdEncoding.DecodeString(img.DataBase64)
-				if err != nil {
-					log.Fatalf("decode image at ts %d: %v", img.TS, err)
-				}
-				ext := ".jpg"
-				if img.MimeType == "image/png" {
-					ext = ".png"
-				}
-				imgPath := filepath.Join(imagesDir, sanitizeTimestamp(img.TS)+ext)
-				if err := os.WriteFile(imgPath, raw, 0644); err != nil {
-					log.Fatalf("write %s: %v", imgPath, err)
-				}
+			ext := ".jpg"
+			if img.MimeType == "image/png" {
+				ext = ".png"
+			}
+			imgPath := filepath.Join(imagesDir, sanitizeTimestamp(img.TS)+ext)
+			if err := os.WriteFile(imgPath, raw, 0644); err != nil {
+				log.Fatalf("write %s: %v", imgPath, err)
 			}
 		}
 	}
 
 	var sonarFrames []SonarFrame
-	if !*skipSonar {
-		var renderParams *sonar.RenderParams
-		if *sonarParamsFile != "" {
-			p := sonar.DefaultRenderParams()
-			data, err := os.ReadFile(*sonarParamsFile)
+
+	var sensorNames []string
+	sensorNames = append(sensorNames, "horizontal-h-sensor", "horizontal-h3-1-sensor", "horizontal-h3-2-sensor", "horizontal-h3-3-sensor")
+
+	appClient := apppb.NewAppServiceClient(conn)
+	robotID, locationID, err := resolveRobotAndLocation(ctx, appClient, *partID)
+	if err != nil {
+		log.Fatalf("resolve robot/location for sonar query: %v", err)
+	}
+
+	// 3. get the sonar frames for the sonar sensors (horizontal-h-sensor, horizontal-h3-1-sensor, horizontal-h3-2-sensor, horizontal-h3-3-sensor) and render them to PNGs
+	sonarFrames, err = fetchSonarFrames(
+		ctx, client, *orgID, locationID, robotID, *partID, sensorNames, "rdk:component:sensor", "Readings",
+		*start, *end, 500,
+	)
+	if err != nil {
+		log.Fatalf("fetch sonar: %v", err)
+	}
+	fmt.Printf("rendered %d sonar frame(s) total\n", len(sonarFrames))
+
+	if len(sonarFrames) > 0 {
+		for _, frame := range sonarFrames {
+			raw, err := base64.StdEncoding.DecodeString(frame.DataBase64)
 			if err != nil {
-				log.Fatalf("read sonar params file: %v", err)
+				log.Fatalf("decode sonar frame at ts %d: %v", frame.TS, err)
 			}
-			if err := json.Unmarshal(data, &p); err != nil {
-				log.Fatalf("parse sonar params file: %v", err)
+			sonarDir := filepath.Join(dir, "sonar-images", sanitizeName(frame.SensorName))
+			if err := os.MkdirAll(sonarDir, 0755); err != nil {
+				log.Fatalf("mkdir %s: %v", sonarDir, err)
 			}
-			renderParams = &p
-		}
-
-		var sensorNames []string
-		for _, s := range strings.Split(*sonarComponentNames, ",") {
-			if s = strings.TrimSpace(s); s != "" {
-				sensorNames = append(sensorNames, s)
-			}
-		}
-
-		appClient := apppb.NewAppServiceClient(conn)
-		robotID, locationID, err := resolveRobotAndLocation(ctx, appClient, *partID)
-		if err != nil {
-			log.Fatalf("resolve robot/location for sonar query: %v", err)
-		}
-
-		sonarFrames, err = fetchSonarFrames(
-			ctx, client, *orgID, locationID, robotID, *partID, sensorNames, *sonarComponentType, *sonarMethodName,
-			effectiveStart, effectiveEnd, *sonarLimit, *sonarSize, renderParams,
-		)
-		if err != nil {
-			log.Fatalf("fetch sonar: %v", err)
-		}
-		fmt.Printf("rendered %d sonar frame(s) total\n", len(sonarFrames))
-
-		if len(sonarFrames) > 0 {
-			for _, frame := range sonarFrames {
-				raw, err := base64.StdEncoding.DecodeString(frame.DataBase64)
-				if err != nil {
-					log.Fatalf("decode sonar frame at ts %d: %v", frame.TS, err)
-				}
-				sonarDir := filepath.Join(dir, "sonar-images", sanitizeName(frame.SensorName))
-				if err := os.MkdirAll(sonarDir, 0755); err != nil {
-					log.Fatalf("mkdir %s: %v", sonarDir, err)
-				}
-				framePath := filepath.Join(sonarDir, sanitizeTimestamp(frame.TS)+".png")
-				if err := os.WriteFile(framePath, raw, 0644); err != nil {
-					log.Fatalf("write %s: %v", framePath, err)
-				}
+			framePath := filepath.Join(sonarDir, sanitizeTimestamp(frame.TS)+".png")
+			if err := os.WriteFile(framePath, raw, 0644); err != nil {
+				log.Fatalf("write %s: %v", framePath, err)
 			}
 		}
 	}
 
+	// 4. write the readings, images, and sonar frames to a JSON file for the placement-playback viewer to consume
 	path := filepath.Join(dir, "readings.json")
 	data, err := json.MarshalIndent(map[string]any{"readings": readings, "images": images, "sonarFrames": sonarFrames}, "", "  ")
 	if err != nil {
