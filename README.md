@@ -365,3 +365,6 @@ make compare OUTPUT=output/<part-id>/<hash>
 make setup
 make markers PART_ID=<part-id> ORG_ID=<org-id> START=2026-07-05T00:00:00Z END=2026-07-06T00:00:00Z DETECT=1
 ```
+
+
+make download SEQUENCE_ID=1b8e6ca3-e545-4d1d-aaec-79e7d7f0e5d5 PART_ID=b073f310-deca-434b-9f87-8cb388f10316

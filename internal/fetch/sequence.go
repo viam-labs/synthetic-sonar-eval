@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +12,7 @@ import (
 
 	"github.com/fullstorydev/grpcurl"
 	"github.com/jhump/protoreflect/grpcreflect"
+	datapb "go.viam.com/api/app/data/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/runtime/protoiface"
@@ -177,7 +176,6 @@ type SequenceDownloader struct {
 	conn       *grpc.ClientConn
 	authToken  string
 	authHeader string
-	httpClient *http.Client
 	Manifest   *Manifest
 	Progress   *SequenceProgress
 }
@@ -187,7 +185,6 @@ func NewSequenceDownloader(conn *grpc.ClientConn, authToken string, m *Manifest,
 		conn:       conn,
 		authToken:  authToken,
 		authHeader: "Authorization: Bearer " + authToken,
-		httpClient: &http.Client{},
 		Manifest:   m,
 		Progress:   p,
 	}
@@ -317,11 +314,19 @@ func (d *SequenceDownloader) downloadTabularResource(ctx context.Context, sequen
 	return nil
 }
 
+// DownloadBinary lists binary captures via the internal sequence API
+// (grpcurl reflection, same as before), then fetches the actual image bytes
+// via the public BinaryDataByIDs API in batches of binaryDataIDBatchSize —
+// mirroring FetchImagesTimeRange's approach — instead of an individual HTTP
+// GET per item's signed URI.
 func (d *SequenceDownloader) DownloadBinary(ctx context.Context, sequenceID, outputDir string) error {
 	if d.Progress.BinaryDone {
 		fmt.Println("  binary: already complete, skipping")
 		return nil
 	}
+
+	client := datapb.NewDataServiceClient(d.conn)
+	authCtx := metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+d.authToken)
 
 	pageToken := d.Progress.BinaryNextPageToken
 	total := 0
@@ -339,53 +344,21 @@ func (d *SequenceDownloader) DownloadBinary(ctx context.Context, sequenceID, out
 		}
 
 		var nextToken string
-		var pageEntries []ManifestEntry
+		var metas []binaryMetadata
 		for _, raw := range responses {
 			var resp binaryResponse
 			if err := json.Unmarshal(raw, &resp); err != nil {
 				return fmt.Errorf("parse binary response: %w", err)
 			}
 			nextToken = resp.NextPageToken
-
 			for _, item := range resp.Data {
-				meta := item.Metadata
-				dir := filepath.Join(outputDir, SanitizeName(meta.CaptureMetadata.ComponentName))
-				if err := os.MkdirAll(dir, 0755); err != nil {
-					return err
-				}
-
-				filename := meta.FileName
-				if filename == "" {
-					ext := meta.FileExt
-					if ext == "" {
-						ext = ".jpeg"
-					}
-					filename = SanitizeTimestamp(meta.TimeRequested) + ext
-				}
-				path := filepath.Join(dir, filename)
-
-				// Skip if already downloaded (covers mid-page crash recovery).
-				if _, err := os.Stat(path); err == nil {
-					pageEntries = append(pageEntries, ManifestEntry{
-						Type:          "binary",
-						Path:          path,
-						TimeCaptured:  meta.TimeRequested,
-						ComponentName: meta.CaptureMetadata.ComponentName,
-					})
-					continue
-				}
-
-				if err := d.downloadFile(meta.URI, path); err != nil {
-					log.Printf("warning: failed to download %s: %v", meta.URI, err)
-					continue
-				}
-				pageEntries = append(pageEntries, ManifestEntry{
-					Type:          "binary",
-					Path:          path,
-					TimeCaptured:  meta.TimeRequested,
-					ComponentName: meta.CaptureMetadata.ComponentName,
-				})
+				metas = append(metas, item.Metadata)
 			}
+		}
+
+		pageEntries, err := d.downloadBinaryBatch(authCtx, client, outputDir, metas)
+		if err != nil {
+			return fmt.Errorf("page %d: %w", page, err)
 		}
 
 		if err := d.Manifest.Add(pageEntries); err != nil {
@@ -409,29 +382,85 @@ func (d *SequenceDownloader) DownloadBinary(ctx context.Context, sequenceID, out
 	return nil
 }
 
-func (d *SequenceDownloader) downloadFile(uri, path string) error {
-	req, err := http.NewRequest(http.MethodGet, uri, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+d.authToken)
+// downloadBinaryBatch resolves each item's on-disk path up front (skipping
+// ones already downloaded, for mid-page crash recovery), then fetches bytes
+// for the rest in batches of binaryDataIDBatchSize via BinaryDataByIDs.
+func (d *SequenceDownloader) downloadBinaryBatch(ctx context.Context, client datapb.DataServiceClient, outputDir string, metas []binaryMetadata) ([]ManifestEntry, error) {
+	var pageEntries []ManifestEntry
+	pathByID := make(map[string]string, len(metas))
+	metaByID := make(map[string]binaryMetadata, len(metas))
+	var pending []string
 
-	resp, err := d.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
+	for _, meta := range metas {
+		dir := filepath.Join(outputDir, SanitizeName(meta.CaptureMetadata.ComponentName))
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil, err
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
+		filename := meta.FileName
+		if filename == "" {
+			ext := meta.FileExt
+			if ext == "" {
+				ext = ".jpeg"
+			}
+			filename = SanitizeTimestamp(meta.TimeRequested) + ext
+		}
+		path := filepath.Join(dir, filename)
+
+		// Skip if already downloaded (covers mid-page crash recovery).
+		if _, err := os.Stat(path); err == nil {
+			pageEntries = append(pageEntries, ManifestEntry{
+				Type:          "binary",
+				Path:          path,
+				TimeCaptured:  meta.TimeRequested,
+				ComponentName: meta.CaptureMetadata.ComponentName,
+			})
+			continue
+		}
+
+		pathByID[meta.BinaryDataID] = path
+		metaByID[meta.BinaryDataID] = meta
+		pending = append(pending, meta.BinaryDataID)
 	}
 
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+	for i := 0; i < len(pending); i += binaryDataIDBatchSize {
+		end := min(i+binaryDataIDBatchSize, len(pending))
+		ids := pending[i:end]
 
-	_, err = io.Copy(f, resp.Body)
-	return err
+		resp, err := client.BinaryDataByIDs(ctx, &datapb.BinaryDataByIDsRequest{
+			IncludeBinary: true,
+			BinaryDataIds: ids,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("BinaryDataByIDs: %w", err)
+		}
+
+		got := make(map[string]bool, len(ids))
+		for _, item := range resp.Data {
+			id := item.GetMetadata().GetBinaryDataId()
+			path, ok := pathByID[id]
+			if !ok {
+				log.Printf("warning: BinaryDataByIDs returned unrequested id %s", id)
+				continue
+			}
+			if err := os.WriteFile(path, item.Binary, 0644); err != nil {
+				return nil, fmt.Errorf("write %s: %w", path, err)
+			}
+			meta := metaByID[id]
+			pageEntries = append(pageEntries, ManifestEntry{
+				Type:          "binary",
+				Path:          path,
+				TimeCaptured:  meta.TimeRequested,
+				ComponentName: meta.CaptureMetadata.ComponentName,
+			})
+			got[id] = true
+		}
+		for _, id := range ids {
+			if !got[id] {
+				log.Printf("warning: BinaryDataByIDs did not return id %s", id)
+			}
+		}
+	}
+
+	return pageEntries, nil
 }
