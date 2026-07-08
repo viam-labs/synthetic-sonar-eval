@@ -1,19 +1,22 @@
-.PHONY: setup download render markers detect-single detect-dir build
+.PHONY: setup download render markers detect-single detect-dir compare build
 
-OUTPUT      ?= output
-SEQUENCE_ID ?=
-FPS         ?= 3
-PARAMS      ?=
-TABULAR     ?=
-PART_ID     ?=
-ORG_ID      ?=
-START       ?=
-END         ?=
-MODEL_DIR   ?= omni-detector-fcos-0_0_4
-IMAGE       ?=
-DIR         ?=
-CONFIDENCE  ?= 0.6
-DETECT      ?=
+OUTPUT        ?= output
+SEQUENCE_ID   ?=
+FPS           ?= 3
+PARAMS        ?=
+TABULAR       ?=
+PART_ID       ?=
+ORG_ID        ?=
+START         ?=
+END           ?=
+MODEL_DIR     ?= omni-detector-fcos-0_0_4
+IMAGE         ?=
+DIR           ?=
+CONFIDENCE    ?= 0.6
+DETECT        ?=
+STRIP_DIST    ?= 150
+RESULTS_DIR   ?= detector-eval
+NO_VISUALIZE  ?=
 
 setup:
 	@echo "VIAM_AUTH_TOKEN=$$(viam login print-access-token)" > .env
@@ -51,11 +54,23 @@ detect-dir:
 	@test -n "$(DIR)" || (echo "error: DIR is required  →  make detect-dir DIR=<path>" && exit 1)
 	go run ./cmd/detect --model-dir $(MODEL_DIR) --image $(DIR) --confidence $(CONFIDENCE)
 
+# point OUTPUT at a download+render directory (with manifest.json, images/screen1/,
+# sonar-images/<fan>/) to compare the detector on screen1 screenshots vs. synthetic
+# sonar renders, e.g. make compare OUTPUT=output/<part-id>/<hash>
+# Writes counts.json/counts.csv plus (unless NO_VISUALIZE=1) annotated images, a
+# per-group montage, and montage.mp4 under OUTPUT/RESULTS_DIR.
+compare:
+	@test -n "$(OUTPUT)" || (echo "error: OUTPUT is required  →  make compare OUTPUT=output/<part-id>/<hash>" && exit 1)
+	go run ./cmd/compare --output $(OUTPUT) --model-dir $(MODEL_DIR) --confidence $(CONFIDENCE) \
+		--results-dirname $(RESULTS_DIR) --fps $(FPS) --screenshot-strip-dist $(STRIP_DIST) \
+		$(if $(NO_VISUALIZE),--no-visualize,)
+
 build:
 	go build -o bin/download       ./cmd/download
 	go build -o bin/render         ./cmd/render
 	go build -o bin/markerplayback ./cmd/markerplayback
 	go build -o bin/detect         ./cmd/detect
+	go build -o bin/compare        ./cmd/compare
 
 
 # make markers PART_ID=f79e293c-612f-496b-b26d-5b8bbaab6524 ORG_ID=4a0a99c7-e680-4cb5-acb1-0bd21449b455 START=2026-07-04T04:00:00Z END=2026-07-06T04:00:00Z (checkmate)

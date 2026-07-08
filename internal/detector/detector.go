@@ -37,10 +37,20 @@ type Detection struct {
 
 // Detector holds a loaded ONNX session and label set for repeated inference.
 type Detector struct {
-	session     *ort.DynamicAdvancedSession
-	labels      []string
-	inputWidth  int64
-	inputHeight int64
+	session             *ort.DynamicAdvancedSession
+	labels              []string
+	inputWidth          int64
+	inputHeight         int64
+	backgroundStripDist float64
+}
+
+// SetBackgroundStripDist configures background stripping: pixels within this
+// Euclidean distance (8-bit RGB space) of the image's estimated background
+// color are zeroed out before inference, matching the omni_inference ONNX
+// core's optional preprocessing step used when training/serving on stripped
+// screenshots. dist <= 0 disables stripping (the default).
+func (d *Detector) SetBackgroundStripDist(dist float64) {
+	d.backgroundStripDist = dist
 }
 
 // New loads model.onnx + labels.txt from modelDir and starts an ONNX
@@ -214,11 +224,18 @@ func (d *Detector) DetectBatch(images []image.Image, minConfidence float32) ([][
 }
 
 // preprocess resizes src to the model's fixed input size with bilinear
-// interpolation and packs it into a uint8 [1, 3, H, W] tensor (RGB, CHW).
+// interpolation, optionally strips the background (see
+// SetBackgroundStripDist), and packs the result into a uint8 [1, 3, H, W]
+// tensor (RGB, CHW) — mirroring OmniOnnxInference._preprocess, which resizes
+// first and strips the background on the resized image.
 func (d *Detector) preprocess(src image.Image) (*ort.Tensor[uint8], error) {
 	w, h := int(d.inputWidth), int(d.inputHeight)
 	resized := image.NewRGBA(image.Rect(0, 0, w, h))
 	xdraw.BiLinear.Scale(resized, resized.Bounds(), src, src.Bounds(), xdraw.Src, nil)
+
+	if d.backgroundStripDist > 0 {
+		resized = backgroundStrip(resized, d.backgroundStripDist)
+	}
 
 	chw := make([]uint8, 3*h*w)
 	planeSize := h * w
