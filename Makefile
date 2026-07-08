@@ -58,6 +58,6 @@ build:
 	go build -o bin/detect         ./cmd/detect
 
 
-# make markers PART_ID=f79e293c-612f-496b-b26d-5b8bbaab6524 ORG_ID=4a0a99c7-e680-4cb5-acb1-0bd21449b455 START=2026-07-06T04:00:00Z END=2026-07-07T04:00:00Z (checkmate)
+# make markers PART_ID=f79e293c-612f-496b-b26d-5b8bbaab6524 ORG_ID=4a0a99c7-e680-4cb5-acb1-0bd21449b455 START=2026-07-04T04:00:00Z END=2026-07-06T04:00:00Z (checkmate)
 # make markers PART_ID=ce6d0f26-aeea-48dd-be34-81e4db0f807e ORG_ID=4a0a99c7-e680-4cb5-acb1-0bd21449b455 (synth sim)
 # add DETECT=1 to either of the above to also run ML fish detection on the fetched images/sonar frames

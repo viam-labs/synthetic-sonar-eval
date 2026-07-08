@@ -21,7 +21,7 @@ import (
 
 const (
 	sequenceTabularMethod = "datamanagement.internalapi.v1.InternalDataService/GetSequenceTabularData"
-	sequenceBinaryMethod  = "datamanagement.internalapi.v1.InternalDataService/GetSequenceBinaryData"
+	sequenceBinaryMethod  = "viam.app.data.v1.DataService/GetSequenceBinaryData"
 )
 
 // SequenceTabularResources are the sonar sensors pulled by sequence-mode
@@ -102,7 +102,12 @@ type SequenceProgress struct {
 	BinaryDone          bool                        `json:"binaryDone"`
 }
 
-func (p *SequenceProgress) tabularDone() bool {
+// TabularDone reports whether every resource in SequenceTabularResources has
+// finished paginating, so callers can tell a fully-completed download apart
+// from one that merely has a tabular/ directory (which downloadTabularResource
+// creates as soon as the first data point for any resource arrives, well
+// before pagination finishes).
+func (p *SequenceProgress) TabularDone() bool {
 	for _, r := range SequenceTabularResources {
 		if !p.TabularResources[r].Done {
 			return false

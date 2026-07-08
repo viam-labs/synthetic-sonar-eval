@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -32,12 +33,18 @@ func parseRFC3339(s string) (*timestamppb.Timestamp, error) {
 	return timestamppb.New(t), nil
 }
 
-// ScreenComponentName/ScreenComponentType identify the screen-capture camera
-// component polled by time-range downloads.
-const (
-	ScreenComponentName = "camera-save-predictions"
-	ScreenComponentType = "rdk:component:camera"
-)
+// ScreenComponentNames/ScreenComponentType identify the screen-capture camera
+// components polled by time-range downloads. All three are treated as the
+// same logical "screen" source: their images are merged into one images/
+// directory and manifest, and downstream consumers (e.g. markerplayback)
+// don't distinguish between them.
+var ScreenComponentNames = []string{
+	"camera-save-predictions",
+	"camera-save-potentials",
+	"camera-data-capture",
+}
+
+const ScreenComponentType = "rdk:component:camera"
 
 // SonarSensorNames are the four sonar fans polled by time-range downloads.
 var SonarSensorNames = []string{
@@ -129,9 +136,10 @@ func fetchImageMetadata(
 	return out, nil
 }
 
-// FetchImagesTimeRange downloads every screen-capture image (component
-// ScreenComponentName) for partID within [start, end], writing raw bytes to
-// <outputDir>/images/ and recording each in m.
+// FetchImagesTimeRange downloads every screen-capture image (components
+// ScreenComponentNames, all treated as the same "screen" source) for partID
+// within [start, end], writing raw bytes to <outputDir>/images/ and
+// recording each in m.
 func FetchImagesTimeRange(
 	ctx context.Context, client datapb.DataServiceClient, orgID, partID, start, end string, pageSize uint64,
 	outputDir string, m *Manifest,
@@ -145,19 +153,24 @@ func FetchImagesTimeRange(
 		return fmt.Errorf("end: %w", err)
 	}
 
-	filter := &datapb.Filter{
-		PartId:          partID,
-		OrganizationIds: []string{orgID},
-		ComponentName:   ScreenComponentName,
-		ComponentType:   ScreenComponentType,
-	}
-	if startTS != nil || endTS != nil {
-		filter.Interval = &datapb.CaptureInterval{Start: startTS, End: endTS}
-	}
+	var metas []*datapb.BinaryData
+	for _, componentName := range ScreenComponentNames {
+		filter := &datapb.Filter{
+			PartId:          partID,
+			OrganizationIds: []string{orgID},
+			ComponentName:   componentName,
+			ComponentType:   ScreenComponentType,
+		}
+		if startTS != nil || endTS != nil {
+			filter.Interval = &datapb.CaptureInterval{Start: startTS, End: endTS}
+		}
 
-	metas, err := fetchImageMetadata(ctx, client, filter, pageSize)
-	if err != nil {
-		return fmt.Errorf("BinaryDataByFilter: %w", err)
+		fmt.Printf("  listing images for component %q...\n", componentName)
+		found, err := fetchImageMetadata(ctx, client, filter, pageSize)
+		if err != nil {
+			return fmt.Errorf("BinaryDataByFilter (%s): %w", componentName, err)
+		}
+		metas = append(metas, found...)
 	}
 	if len(metas) == 0 {
 		fmt.Println("  no images found in range")
@@ -190,8 +203,10 @@ func FetchImagesTimeRange(
 		for _, d := range resp.Data {
 			meta := d.Metadata
 			mimeType := ""
+			componentName := ""
 			if meta.CaptureMetadata != nil {
 				mimeType = meta.CaptureMetadata.MimeType
+				componentName = meta.CaptureMetadata.ComponentName
 			}
 			if mimeType == "" {
 				mimeType = mimeTypeFromExt(meta.FileExt)
@@ -222,7 +237,7 @@ func FetchImagesTimeRange(
 				Type:          "binary",
 				Path:          path,
 				TimeCaptured:  ts.Format(time.RFC3339Nano),
-				ComponentName: ScreenComponentName,
+				ComponentName: componentName,
 			})
 		}
 		if err := m.Add(pageEntries); err != nil {
@@ -348,10 +363,31 @@ func extractReadingsPayload(doc map[string]interface{}) (payload json.RawMessage
 	return raw, received.Time().UTC(), true
 }
 
+// sonarWindowSize is the fixed query span used to fetch sonar readings.
+// Small fixed windows keep each query well under the server's "result set is
+// too large" guard from the outset, so windows can simply be fetched
+// concurrently instead of the old scheme of querying a whole day and
+// reactively bisecting it on failure.
+const sonarWindowSize = 5 * time.Minute
+
+// sonarFetchConcurrency caps how many sonar window queries run at once.
+const sonarFetchConcurrency = 8
+
+// sonarWindowJob is one (sensor, day, sub-window) query to run, where day is
+// the capture_day bucket the window falls within (see buildCaptureDayPipeline).
+type sonarWindowJob struct {
+	sensorName             string
+	day                    time.Time
+	windowStart, windowEnd time.Time
+}
+
 // FetchSonarTimeRange downloads raw sonar tabular readings for SonarSensorNames
 // within [start, end] for partID, writing TabularDataPoint-shaped JSON (so
 // internal/sonar.RenderDirectory can render either download mode uniformly)
-// to <outputDir>/tabular/<sensor>/ and recording each in m.
+// to <outputDir>/tabular/<sensor>/ and recording each in m. Queries run as
+// sonarWindowSize-wide windows fetched concurrently (up to
+// sonarFetchConcurrency at a time) across every sensor and window, rather
+// than one sensor/day at a time.
 func FetchSonarTimeRange(
 	ctx context.Context, client datapb.DataServiceClient, orgID, locationID, robotID, partID string,
 	start, end string, outputDir string, m *Manifest,
@@ -367,19 +403,15 @@ func FetchSonarTimeRange(
 
 	startDay := time.Date(startTime.Year(), startTime.Month(), startTime.Day(), 0, 0, 0, 0, time.UTC)
 	endDay := time.Date(endTime.Year(), endTime.Month(), endTime.Day(), 0, 0, 0, 0, time.UTC)
-	var days []time.Time
-	for d := startDay; !d.After(endDay); d = d.AddDate(0, 0, 1) {
-		days = append(days, d)
-	}
 
+	var jobs []sonarWindowJob
 	for _, sensorName := range SonarSensorNames {
 		sensorDir := filepath.Join(outputDir, "tabular", SanitizeName(sensorName))
 		if err := os.MkdirAll(sensorDir, 0755); err != nil {
 			return err
 		}
 
-		found, failed := 0, 0
-		for dayIdx, day := range days {
+		for day := startDay; !day.After(endDay); day = day.AddDate(0, 0, 1) {
 			// Intersect the requested [start, end] with this calendar day's
 			// bounds, since capture_day matches the whole day but we only want
 			// what's actually in range.
@@ -392,19 +424,57 @@ func FetchSonarTimeRange(
 				dayUpperBound = endTime
 			}
 
-			n, err := fetchSonarWindow(ctx, client, orgID, locationID, robotID, partID, sensorName, sensorDir, day, dayLowerBound, dayUpperBound, m)
-			found += n
-			if err != nil {
-				log.Printf("error: %s: %v", sensorName, err)
-				failed++
+			for ws := dayLowerBound; ws.Before(dayUpperBound); ws = ws.Add(sonarWindowSize) {
+				we := ws.Add(sonarWindowSize)
+				if we.After(dayUpperBound) {
+					we = dayUpperBound
+				}
+				jobs = append(jobs, sonarWindowJob{sensorName: sensorName, day: day, windowStart: ws, windowEnd: we})
 			}
-			fmt.Printf("  %s: day %d/%d (%s) — %d record(s) so far\n",
-				sensorName, dayIdx+1, len(days), day.Format("2006-01-02"), found)
 		}
-		if failed > 0 {
-			log.Printf("warning: %s: %d/%d day quer(y/ies) failed (timeout or error) and were skipped", sensorName, failed, len(days))
+	}
+	fmt.Printf("fetching sonar readings across %d window(s) (%d sensor(s), %s each, up to %d at a time)...\n",
+		len(jobs), len(SonarSensorNames), sonarWindowSize, sonarFetchConcurrency)
+
+	var (
+		wg        sync.WaitGroup
+		sem       = make(chan struct{}, sonarFetchConcurrency)
+		mu        sync.Mutex
+		found     = make(map[string]int, len(SonarSensorNames))
+		failed    = make(map[string]int, len(SonarSensorNames))
+		completed int
+	)
+	for _, j := range jobs {
+		sensorDir := filepath.Join(outputDir, "tabular", SanitizeName(j.sensorName))
+
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(j sonarWindowJob) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			n, err := fetchSonarWindow(ctx, client, orgID, locationID, robotID, partID, j.sensorName, sensorDir, j.day, j.windowStart, j.windowEnd, m)
+
+			mu.Lock()
+			defer mu.Unlock()
+			found[j.sensorName] += n
+			if err != nil {
+				log.Printf("error: %s %s to %s: %v", j.sensorName, j.windowStart.Format(time.RFC3339), j.windowEnd.Format(time.RFC3339), err)
+				failed[j.sensorName]++
+			}
+			completed++
+			if completed%25 == 0 || completed == len(jobs) {
+				fmt.Printf("  %d/%d window(s) done\n", completed, len(jobs))
+			}
+		}(j)
+	}
+	wg.Wait()
+
+	for _, sensorName := range SonarSensorNames {
+		if failed[sensorName] > 0 {
+			log.Printf("warning: %s: %d window(s) failed (timeout or error) and were skipped", sensorName, failed[sensorName])
 		}
-		fmt.Printf("%s: fetched %d record(s) across %d day(s)\n", sensorName, found, len(days))
+		fmt.Printf("%s: fetched %d record(s)\n", sensorName, found[sensorName])
 	}
 
 	return nil
@@ -435,6 +505,7 @@ func fetchSonarWindow(
 		MqlBinary:      mqlBinary,
 	})
 	if err != nil {
+		fmt.Printf("window start: %s, window end: %s, error: %v\n", windowStart.Format(time.RFC3339), windowEnd.Format(time.RFC3339), err)
 		if shouldBisectWindow(err) && windowEnd.Sub(windowStart) > minSonarBisectWindow {
 			mid := windowStart.Add(windowEnd.Sub(windowStart) / 2)
 			left, leftErr := fetchSonarWindow(ctx, client, orgID, locationID, robotID, partID, sensorName, sensorDir, day, windowStart, mid, m)

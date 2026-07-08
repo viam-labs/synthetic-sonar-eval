@@ -2,7 +2,10 @@
 // whole recorded sequence (--sequence-id) or by polling a time range
 // (--start/--end), and writes it under
 // <output>/<part-id>/<hash-of-params>/ so re-running with the same
-// parameters is a cheap no-op (skipped once that hash directory exists).
+// parameters is a cheap no-op once images/ and tabular/ each already have
+// content — checked independently, so a run that only got partway (e.g.
+// images downloaded but not sonar readings) resumes just the missing piece
+// instead of re-downloading everything or skipping outright.
 package main
 
 import (
@@ -94,11 +97,33 @@ func main() {
 		hash = fetch.Hash(*orgID, *start, *end)
 	}
 
-	dir, exists, err := fetch.ResolveDir(*outputDir, *partID, hash)
-	if err != nil {
-		log.Fatalf("resolve download dir: %v", err)
+	dir := fetch.ResolveDir(*outputDir, *partID, hash)
+
+	// Sequence mode already tracks per-resource completion in progress.json
+	// (DownloadTabular/DownloadBinary each resume or skip precisely off of
+	// it), so consult that instead of directory content: a tabular/ dir can
+	// exist with files in it long before every sensor has actually finished
+	// paginating. Range mode has no such per-resource tracking, so directory
+	// content is the best available signal there.
+	var imagesDone, tabularDone bool
+	if sequenceMode {
+		p, err := fetch.LoadSequenceProgress(filepath.Join(dir, "progress.json"), *sequenceID)
+		if err != nil {
+			log.Fatalf("load progress: %v", err)
+		}
+		imagesDone, tabularDone = p.BinaryDone, p.TabularDone()
+	} else {
+		var err error
+		imagesDone, err = fetch.DirHasContent(filepath.Join(dir, "images"))
+		if err != nil {
+			log.Fatalf("check images dir: %v", err)
+		}
+		tabularDone, err = fetch.DirHasContent(filepath.Join(dir, "tabular"))
+		if err != nil {
+			log.Fatalf("check tabular dir: %v", err)
+		}
 	}
-	if exists {
+	if imagesDone && tabularDone {
 		fmt.Printf("found existing download for part %s at %s (hash %s) — skipping\n", *partID, dir, hash)
 		return
 	}
@@ -119,12 +144,15 @@ func main() {
 		downloadSequence(ctx, conn, *authToken, *sequenceID, dir, uint32(*pageSize))
 	} else {
 		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+*authToken)
-		downloadTimeRange(ctx, conn, *orgID, *partID, *start, *end, dir, uint64(*imagePageSize))
+		downloadTimeRange(ctx, conn, *orgID, *partID, *start, *end, dir, uint64(*imagePageSize), imagesDone, tabularDone)
 	}
 
 	fmt.Printf("Done. Data at %s\n", dir)
 }
 
+// downloadSequence downloads tabular and binary sequence data unconditionally
+// — DownloadTabular and DownloadBinary each consult progress.json internally
+// and skip/resume per-resource, so there's no need to gate the calls here.
 func downloadSequence(ctx context.Context, conn *grpc.ClientConn, authToken, sequenceID, dir string, pageSize uint32) {
 	tabularDir := filepath.Join(dir, "tabular")
 	imagesDir := filepath.Join(dir, "images")
@@ -161,7 +189,7 @@ func downloadSequence(ctx context.Context, conn *grpc.ClientConn, authToken, seq
 	fmt.Printf("Binary complete: %d total manifest entries\n\n", len(m.Entries()))
 }
 
-func downloadTimeRange(ctx context.Context, conn *grpc.ClientConn, orgID, partID, start, end, dir string, imagePageSize uint64) {
+func downloadTimeRange(ctx context.Context, conn *grpc.ClientConn, orgID, partID, start, end, dir string, imagePageSize uint64, skipImages, skipTabular bool) {
 	manifestPath := filepath.Join(dir, "manifest.json")
 	m, err := fetch.LoadManifest(manifestPath)
 	if err != nil {
@@ -169,13 +197,21 @@ func downloadTimeRange(ctx context.Context, conn *grpc.ClientConn, orgID, partID
 	}
 
 	client := datapb.NewDataServiceClient(conn)
-	appClient := apppb.NewAppServiceClient(conn)
 
-	fmt.Println("Fetching screen images...")
-	if err := fetch.FetchImagesTimeRange(ctx, client, orgID, partID, start, end, imagePageSize, dir, m); err != nil {
-		log.Fatalf("fetch images: %v", err)
+	if skipImages {
+		fmt.Println("images already downloaded, skipping")
+	} else {
+		fmt.Println("Fetching screen images...")
+		if err := fetch.FetchImagesTimeRange(ctx, client, orgID, partID, start, end, imagePageSize, dir, m); err != nil {
+			log.Fatalf("fetch images: %v", err)
+		}
 	}
 
+	if skipTabular {
+		fmt.Println("sonar readings already downloaded, skipping")
+		return
+	}
+	appClient := apppb.NewAppServiceClient(conn)
 	robotID, locationID, err := fetch.ResolveRobotAndLocation(ctx, appClient, partID)
 	if err != nil {
 		log.Fatalf("resolve robot/location for sonar query: %v", err)

@@ -37,16 +37,26 @@ func Hash(parts ...string) string {
 }
 
 // ResolveDir returns the cache directory for a given part ID + hash key
-// under outputDir, along with whether it already exists (a cache hit, in
-// which case the caller should skip downloading and just read from it).
-func ResolveDir(outputDir, partID, hash string) (dir string, alreadyExists bool, err error) {
-	dir = filepath.Join(outputDir, SanitizeName(partID), hash)
-	if _, statErr := os.Stat(dir); statErr == nil {
-		return dir, true, nil
-	} else if !os.IsNotExist(statErr) {
-		return "", false, fmt.Errorf("stat %s: %w", dir, statErr)
+// under outputDir. Callers should check DirHasContent on the specific
+// sub-directories they care about (e.g. images/, tabular/) rather than
+// treating this directory's mere existence as "already downloaded" — it may
+// have been created by a prior run that crashed partway through.
+func ResolveDir(outputDir, partID, hash string) string {
+	return filepath.Join(outputDir, SanitizeName(partID), hash)
+}
+
+// DirHasContent reports whether path exists and already contains at least
+// one entry. A directory that exists but is empty (e.g. created up-front by
+// os.MkdirAll before any file was written) does not count as downloaded.
+func DirHasContent(path string) (bool, error) {
+	entries, err := os.ReadDir(path)
+	if os.IsNotExist(err) {
+		return false, nil
 	}
-	return dir, false, nil
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	return len(entries) > 0, nil
 }
 
 // SanitizeName replaces path-unsafe characters in a resource/component name.

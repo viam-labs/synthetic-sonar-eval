@@ -395,11 +395,16 @@ func main() {
 	// downloaded, reusing cmd/download's cache (internal/fetch) if another run
 	// already fetched the same part-id/window.
 	hash := fetch.Hash(*orgID, windowStart, windowEnd)
-	dir, exists, err := fetch.ResolveDir(*outputDir, *partID, hash)
+	dir := fetch.ResolveDir(*outputDir, *partID, hash)
+	imagesDone, err := fetch.DirHasContent(filepath.Join(dir, "images"))
 	if err != nil {
-		log.Fatalf("resolve download dir: %v", err)
+		log.Fatalf("check images dir: %v", err)
 	}
-	if exists {
+	tabularDone, err := fetch.DirHasContent(filepath.Join(dir, "tabular"))
+	if err != nil {
+		log.Fatalf("check tabular dir: %v", err)
+	}
+	if imagesDone && tabularDone {
 		fmt.Printf("found existing download at %s (hash %s) — reusing\n", dir, hash)
 	} else {
 		if err := os.MkdirAll(dir, 0755); err != nil {
@@ -410,20 +415,28 @@ func main() {
 			log.Fatalf("load manifest: %v", err)
 		}
 
-		fmt.Println("Fetching screen images...")
-		if err := fetch.FetchImagesTimeRange(ctx, client, *orgID, *partID, windowStart, windowEnd, uint64(*imagePageSize), dir, m); err != nil {
-			log.Fatalf("fetch images: %v", err)
+		if imagesDone {
+			fmt.Println("images already downloaded, skipping")
+		} else {
+			fmt.Println("Fetching screen images...")
+			if err := fetch.FetchImagesTimeRange(ctx, client, *orgID, *partID, windowStart, windowEnd, uint64(*imagePageSize), dir, m); err != nil {
+				log.Fatalf("fetch images: %v", err)
+			}
 		}
 
-		appClient := apppb.NewAppServiceClient(conn)
-		robotID, locationID, err := fetch.ResolveRobotAndLocation(ctx, appClient, *partID)
-		if err != nil {
-			log.Fatalf("resolve robot/location for sonar query: %v", err)
-		}
+		if tabularDone {
+			fmt.Println("sonar readings already downloaded, skipping")
+		} else {
+			appClient := apppb.NewAppServiceClient(conn)
+			robotID, locationID, err := fetch.ResolveRobotAndLocation(ctx, appClient, *partID)
+			if err != nil {
+				log.Fatalf("resolve robot/location for sonar query: %v", err)
+			}
 
-		fmt.Println("Fetching sonar readings...")
-		if err := fetch.FetchSonarTimeRange(ctx, client, *orgID, locationID, robotID, *partID, windowStart, windowEnd, dir, m); err != nil {
-			log.Fatalf("fetch sonar: %v", err)
+			fmt.Println("Fetching sonar readings...")
+			if err := fetch.FetchSonarTimeRange(ctx, client, *orgID, locationID, robotID, *partID, windowStart, windowEnd, dir, m); err != nil {
+				log.Fatalf("fetch sonar: %v", err)
+			}
 		}
 	}
 
