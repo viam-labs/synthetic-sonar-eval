@@ -43,6 +43,7 @@ func main() {
 	start := flag.String("start", "", "only include data at/after this RFC3339 time (mode B — mutually exclusive with --sequence-id)")
 	end := flag.String("end", "", "only include data at/before this RFC3339 time (mode B)")
 	imagePageSize := flag.Uint("image-page-size", 50, "page size for image pagination (time-range mode)")
+	printDir := flag.Bool("print-dir", false, "print the resolved output directory (<output>/<part-id>/<hash>) for these parameters and exit, without downloading or requiring an auth token — lets other tooling (e.g. make) resolve the same cache path a real download would use")
 	flag.Parse()
 
 	if *authToken == "" {
@@ -54,7 +55,7 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
-	if *authToken == "" {
+	if !*printDir && *authToken == "" {
 		fmt.Fprintln(os.Stderr, "error: auth token required (set VIAM_AUTH_TOKEN in .env or use --token)")
 		os.Exit(1)
 	}
@@ -98,6 +99,11 @@ func main() {
 	}
 
 	dir := fetch.ResolveDir(*outputDir, *partID, hash)
+
+	if *printDir {
+		fmt.Println(dir)
+		return
+	}
 
 	// Sequence mode already tracks per-resource completion in progress.json
 	// (DownloadTabular/DownloadBinary each resume or skip precisely off of
