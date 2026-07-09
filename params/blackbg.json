@@ -1,8 +1,8 @@
 {
-    "_label": "blackbg_dbpc0p2_calibrated",
-    "dbPerCount": 0.2,
-    "dbWindow": 3000,
-    "dbDisplayHeadroom": 200,
+    "_label": "blackbg_calibrated_fixed_db",
+    "dbPerCount": 0.011759,
+    "dbMin": -100,
+    "dbMax": -64,
     "heatmapRangeSigmaFactor": 1.5,
     "heatmapArcSigmaFactor": 0.5,
     "heatmapMinThreshold": 0.03,

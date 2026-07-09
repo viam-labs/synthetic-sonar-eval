@@ -23,12 +23,15 @@ type ColorStop struct {
 	B float64 `json:"b"`
 }
 
+// dBPerCountCalibrated converts a raw sonar amplitude count to dB, per the
+// sensor's fixed-point encoding: 10*log10(2)/256 (~0.01176 dB/count).
+var dBPerCountCalibrated = 10.0 * math.Log10(2) / 256.0
+var dbMax = -64.0
+var dbMin = -100.0
+
 // RenderParams controls the visual output of RenderFanSampleGrid.
 // Use DefaultRenderParams to get a fully populated value, then override as needed.
 type RenderParams struct {
-	DBPerCount              float64     `json:"dbPerCount"`
-	DBWindow                float64     `json:"dbWindow"`
-	DBDisplayHeadroom       float64     `json:"dbDisplayHeadroom"`
 	HeatmapRangeSigmaFactor float64     `json:"heatmapRangeSigmaFactor"`
 	HeatmapArcSigmaFactor   float64     `json:"heatmapArcSigmaFactor"`
 	HeatmapMinThreshold     float64     `json:"heatmapMinThreshold"`
@@ -38,23 +41,20 @@ type RenderParams struct {
 // DefaultRenderParams returns the default rendering parameters.
 func DefaultRenderParams() RenderParams {
 	return RenderParams{
-		DBPerCount:              0.2,
-		DBWindow:                3000.0,
-		DBDisplayHeadroom:       200.0,
 		HeatmapRangeSigmaFactor: 1.5,
 		HeatmapArcSigmaFactor:   0.5,
 		HeatmapMinThreshold:     0.03,
 		ColorStops: []ColorStop{
 			{0.00, 0, 0, 0},
-			{0.12, 0, 200, 255},
-			{0.18, 0, 255, 64},
-			{0.24, 255, 255, 0},
-			{0.32, 255, 128, 0},
-			{0.40, 255, 0, 0},
-			{0.55, 255, 0, 0},
-			{0.70, 140, 0, 0},
-			{0.85, 55, 0, 0},
-			{1.00, 18, 0, 0},
+			{0.11, 0, 0, 200},
+			{0.22, 0, 100, 255},
+			{0.33, 0, 220, 220},
+			{0.44, 0, 220, 80},
+			{0.56, 170, 230, 0},
+			{0.67, 255, 220, 0},
+			{0.78, 255, 130, 0},
+			{0.89, 230, 30, 0},
+			{1.00, 110, 0, 0},
 		},
 	}
 }
@@ -114,10 +114,10 @@ func cmapLookup(lut *[cmapLUTN + 1][4]byte, t float64) [4]byte {
 }
 
 // RenderFanSampleGrid renders a sonar fan into a square RGBA image via Gaussian
-// splatting. The dB display window is computed automatically: anchored at the
-// frame noise floor, at least DBWindow wide, and extended to DBDisplayHeadroom
-// above the frame peak so echoes are never saturated. Pass nil for params to
-// use DefaultRenderParams.
+// splatting. Raw amplitude counts are converted to dB via DBPerCount and mapped
+// onto a fixed [DBMin, DBMax] display window: values at or below DBMin are
+// transparent/background, values at or above DBMax use the top colormap color.
+// Pass nil for params to use DefaultRenderParams.
 func RenderFanSampleGrid(grid *FanSampleGrid, size int, params *RenderParams) (image.Image, error) {
 	if grid == nil {
 		return nil, fmt.Errorf("fan sample grid is required")
@@ -140,22 +140,7 @@ func RenderFanSampleGrid(grid *FanSampleGrid, size int, params *RenderParams) (i
 	nSamples := grid.NSamples
 	cosTilt := grid.CosTilt
 
-	noiseFloor := float64(grid.MinAmp)
-	dbMin := noiseFloor * p.DBPerCount
-	dbMax := dbMin + p.DBWindow
-	signalPeakDb := dbMin
-	for _, v := range grid.Amps {
-		if db := float64(v) * p.DBPerCount; db > signalPeakDb {
-			signalPeakDb = db
-		}
-	}
-	if signalPeakDb > dbMin {
-		dbMax = math.Max(dbMax, signalPeakDb+p.DBDisplayHeadroom)
-	}
 	dbSpan := dbMax - dbMin
-	if dbSpan < 1e-9 {
-		dbSpan = 1
-	}
 
 	azEdges := make([]float64, nBeams+1)
 	if nBeams > 1 {
@@ -258,7 +243,7 @@ func RenderFanSampleGrid(grid *FanSampleGrid, size int, params *RenderParams) (i
 		if !ok {
 			continue
 		}
-		db := float64(v) * p.DBPerCount
+		db := float64(v) * dBPerCountCalibrated
 		norm := (db - dbMin) / dbSpan
 		if norm <= 0 {
 			continue
@@ -320,7 +305,7 @@ func RenderFanSampleGrid(grid *FanSampleGrid, size int, params *RenderParams) (i
 	// Absolute intensity: no per-frame max-normalization. `heat` is already in
 	// dB-window-normalized units (per-cell `norm` in [0,1], Gaussian peak 1), so
 	// it maps straight onto the colormap. This keeps intensity comparable across
-	// frames (weak frames stay weak) and makes dbWindow / dbPerCount the real
+	// frames (weak frames stay weak) and makes DBMin/DBMax/DBPerCount the real
 	// gain knobs. Overlapping splats can sum past 1, so clamp.
 	for py := 0; py < size; py++ {
 		rowOff := py * img.Stride
