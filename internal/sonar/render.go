@@ -42,8 +42,15 @@ type RenderParams struct {
 	// max-combined; "bilinear" scan-converts the polar amp grid to the
 	// cartesian image with bilinear interpolation in (beam, sample) space —
 	// tapered stroke edges, the classic sonar-display drawing style.
-	SplatKernel string      `json:"splatKernel"`
-	ColorStops  []ColorStop `json:"colorStops"`
+	SplatKernel string `json:"splatKernel"`
+	// RadialPeakWindow (bilinear kernel only, 0 = off) applies per-beam
+	// non-max suppression along the sample axis before scan conversion:
+	// a sample survives only if it is the maximum within +/- this many
+	// samples in range. The vendor display draws echoes radially thinner
+	// than their raw energy extent (~1 sample vs ~3 measured); this
+	// reproduces that sharpening.
+	RadialPeakWindow int         `json:"radialPeakWindow"`
+	ColorStops       []ColorStop `json:"colorStops"`
 }
 
 // DefaultRenderParams returns the default rendering parameters.
@@ -259,7 +266,7 @@ func RenderFanSampleGridGray(grid *FanSampleGrid, size int, params *RenderParams
 	switch kernel {
 	case "gauss", "cell":
 	case "bilinear":
-		scanConvertBilinear(grid, size, heat, minH, spanH, maxV, spanV)
+		scanConvertBilinear(grid, size, heat, minH, spanH, maxV, spanV, p.RadialPeakWindow)
 		splatAmps = nil // heat fully painted; skip the per-sample splat loop
 	default:
 		return nil, fmt.Errorf("unknown splatKernel %q (want \"gauss\", \"cell\" or \"bilinear\")", kernel)
@@ -401,7 +408,7 @@ func RenderFanSampleGridGray(grid *FanSampleGrid, size int, params *RenderParams
 // cells' dB-window-normalized values. Cells absent from Amps (at/below the
 // frame noise floor) interpolate as 0, so stroke edges taper instead of
 // ending on hard cell boundaries.
-func scanConvertBilinear(grid *FanSampleGrid, size int, heat []float64, minH, spanH, maxV, spanV float64) {
+func scanConvertBilinear(grid *FanSampleGrid, size int, heat []float64, minH, spanH, maxV, spanV float64, radialPeakWindow int) {
 	nBeams, nSamples := grid.NBeams, grid.NSamples
 	dbSpan := dbMax - dbMin
 	normGrid := make([]float64, nBeams*nSamples)
@@ -419,6 +426,30 @@ func scanConvertBilinear(grid *FanSampleGrid, size int, heat []float64, minH, sp
 			norm = 1
 		}
 		normGrid[b*nSamples+s] = norm
+	}
+
+	if radialPeakWindow > 0 {
+		suppressed := make([]float64, len(normGrid))
+		for b := 0; b < nBeams; b++ {
+			row := normGrid[b*nSamples : (b+1)*nSamples]
+			out := suppressed[b*nSamples : (b+1)*nSamples]
+			for s := 0; s < nSamples; s++ {
+				if row[s] == 0 {
+					continue
+				}
+				isPeak := true
+				for d := -radialPeakWindow; d <= radialPeakWindow; d++ {
+					if j := s + d; j >= 0 && j < nSamples && row[j] > row[s] {
+						isPeak = false
+						break
+					}
+				}
+				if isPeak {
+					out[s] = row[s]
+				}
+			}
+		}
+		normGrid = suppressed
 	}
 
 	az := grid.AZSorted
