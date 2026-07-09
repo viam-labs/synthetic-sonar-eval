@@ -113,35 +113,10 @@ func cmapLookup(lut *[cmapLUTN + 1][4]byte, t float64) [4]byte {
 	return lut[i]
 }
 
-// RenderFanSampleGrid renders a sonar fan into a square RGBA image via Gaussian
-// splatting. Raw amplitude counts are converted to dB via DBPerCount and mapped
-// onto a fixed [DBMin, DBMax] display window: values at or below DBMin are
-// transparent/background, values at or above DBMax use the top colormap color.
-// Pass nil for params to use DefaultRenderParams.
-func RenderFanSampleGrid(grid *FanSampleGrid, size int, params *RenderParams) (image.Image, error) {
-	if grid == nil {
-		return nil, fmt.Errorf("fan sample grid is required")
-	}
-	if size <= 0 {
-		size = DefaultRenderSize
-	}
-
-	p := DefaultRenderParams()
-	if params != nil {
-		p = *params
-		if len(p.ColorStops) < 2 {
-			p.ColorStops = DefaultRenderParams().ColorStops
-		}
-	}
-
-	cmap := buildCmapLUT(p.ColorStops)
-
+// fanAzEdges returns the nBeams+1 azimuth bin edges (degrees) bracketing
+// each beam's AZSorted center, extrapolated at the ends.
+func fanAzEdges(grid *FanSampleGrid) []float64 {
 	nBeams := grid.NBeams
-	nSamples := grid.NSamples
-	cosTilt := grid.CosTilt
-
-	dbSpan := dbMax - dbMin
-
 	azEdges := make([]float64, nBeams+1)
 	if nBeams > 1 {
 		daz := make([]float64, nBeams-1)
@@ -157,53 +132,81 @@ func RenderFanSampleGrid(grid *FanSampleGrid, size int, params *RenderParams) (i
 		azEdges[0] = grid.AZSorted[0] - 1
 		azEdges[1] = grid.AZSorted[0] + 1
 	}
+	return azEdges
+}
+
+// fanExtent computes the vessel-relative pixel-mapping window for a fan. A
+// square image of pixel size `size` maps pixel (px,py) to vessel-relative
+// coordinates (yVessel, xVessel) via:
+//
+//	yVessel = minH + px/size*spanH   (lateral, "H")
+//	xVessel = maxV - py/size*spanV   (forward along boresight, "V")
+//
+// This is the same geometry RenderFanSampleGrid uses internally, exposed so
+// the ping-ping filter can re-project one frame's pixels into another
+// frame's window.
+func fanExtent(grid *FanSampleGrid) (minH, spanH, maxV, spanV float64) {
+	nSamples := grid.NSamples
+	cosTilt := grid.CosTilt
+	azEdges := fanAzEdges(grid)
 
 	rangeEdges := make([]float64, nSamples+1)
 	for i := 0; i <= nSamples; i++ {
 		rangeEdges[i] = float64(i) * grid.RangePerSample
 	}
 
-	xCorners := make([][]float64, nBeams+1)
-	yCorners := make([][]float64, nBeams+1)
-	for i := 0; i <= nBeams; i++ {
-		xCorners[i] = make([]float64, nSamples+1)
-		yCorners[i] = make([]float64, nSamples+1)
-		azRad := azEdges[i] * math.Pi / 180
+	minH, maxH := math.Inf(1), math.Inf(-1)
+	minV, maxV := math.Inf(1), math.Inf(-1)
+	for _, az := range azEdges {
+		azRad := az * math.Pi / 180
 		cosAZ := math.Cos(azRad)
 		sinAZ := math.Sin(azRad)
-		for j := 0; j <= nSamples; j++ {
-			r := rangeEdges[j]
-			xCorners[i][j] = r * cosAZ * cosTilt
-			yCorners[i][j] = r * sinAZ * cosTilt
+		for _, r := range rangeEdges {
+			x := r * cosAZ * cosTilt
+			y := r * sinAZ * cosTilt
+			minH = math.Min(minH, y)
+			maxH = math.Max(maxH, y)
+			minV = math.Min(minV, x)
+			maxV = math.Max(maxV, x)
 		}
 	}
-
-	minH, maxH := yCorners[0][0], yCorners[0][0]
-	minV, maxV := xCorners[0][0], xCorners[0][0]
-	for i := range xCorners {
-		for j := range xCorners[i] {
-			if yCorners[i][j] < minH {
-				minH = yCorners[i][j]
-			}
-			if yCorners[i][j] > maxH {
-				maxH = yCorners[i][j]
-			}
-			if xCorners[i][j] < minV {
-				minV = xCorners[i][j]
-			}
-			if xCorners[i][j] > maxV {
-				maxV = xCorners[i][j]
-			}
-		}
-	}
-	spanH := maxH - minH
-	spanV := maxV - minV
+	spanH = maxH - minH
+	spanV = maxV - minV
 	if spanH < 1e-6 {
 		spanH = 1
 	}
 	if spanV < 1e-6 {
 		spanV = 1
 	}
+	return minH, spanH, maxV, spanV
+}
+
+// RenderFanSampleGridGray renders a sonar fan into a square 8-bit grayscale
+// "signal image" via Gaussian splatting: white (255) is the top of the
+// [DBMin, DBMax] display window, black (0) is at/below DBMin or below
+// HeatmapMinThreshold. This is the image the ping-ping filter blends on —
+// ColorizeGray then maps it through the color ramp for display. Pass nil for
+// params to use DefaultRenderParams.
+func RenderFanSampleGridGray(grid *FanSampleGrid, size int, params *RenderParams) (*image.Gray, error) {
+	if grid == nil {
+		return nil, fmt.Errorf("fan sample grid is required")
+	}
+	if size <= 0 {
+		size = DefaultRenderSize
+	}
+
+	p := DefaultRenderParams()
+	if params != nil {
+		p = *params
+	}
+
+	nBeams := grid.NBeams
+	cosTilt := grid.CosTilt
+
+	dbSpan := dbMax - dbMin
+
+	azEdges := fanAzEdges(grid)
+	minH, spanH, maxV, spanV := fanExtent(grid)
 
 	metersPerPixH := spanH / float64(size)
 	metersPerPixV := spanV / float64(size)
@@ -292,21 +295,14 @@ func RenderFanSampleGrid(grid *FanSampleGrid, size int, params *RenderParams) (i
 		}
 	}
 
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-
-	bg := cmapLookup(&cmap, 0)
-	for i := 0; i < len(img.Pix); i += 4 {
-		img.Pix[i] = bg[0]
-		img.Pix[i+1] = bg[1]
-		img.Pix[i+2] = bg[2]
-		img.Pix[i+3] = bg[3]
-	}
+	img := image.NewGray(image.Rect(0, 0, size, size))
 
 	// Absolute intensity: no per-frame max-normalization. `heat` is already in
 	// dB-window-normalized units (per-cell `norm` in [0,1], Gaussian peak 1), so
-	// it maps straight onto the colormap. This keeps intensity comparable across
-	// frames (weak frames stay weak) and makes DBMin/DBMax/DBPerCount the real
-	// gain knobs. Overlapping splats can sum past 1, so clamp.
+	// it maps straight onto the 0-255 gray range. This keeps intensity
+	// comparable across frames (weak frames stay weak) and makes
+	// DBMin/DBMax/DBPerCount the real gain knobs. Overlapping splats can sum
+	// past 1, so clamp.
 	for py := 0; py < size; py++ {
 		rowOff := py * img.Stride
 		heatRow := py * size
@@ -316,15 +312,53 @@ func RenderFanSampleGrid(grid *FanSampleGrid, size int, params *RenderParams) (i
 				v = 1
 			}
 			if v > p.HeatmapMinThreshold {
-				c := cmapLookup(&cmap, v)
-				off := rowOff + px*4
-				img.Pix[off] = c[0]
-				img.Pix[off+1] = c[1]
-				img.Pix[off+2] = c[2]
-				img.Pix[off+3] = c[3]
+				img.Pix[rowOff+px] = uint8(math.Round(v * 255))
 			}
 		}
 	}
 
 	return img, nil
+}
+
+// ColorizeGray maps a grayscale signal image (see RenderFanSampleGridGray)
+// through the RenderParams color ramp, producing the final display image.
+// Pass nil for params to use DefaultRenderParams.
+func ColorizeGray(gray *image.Gray, params *RenderParams) image.Image {
+	p := DefaultRenderParams()
+	if params != nil {
+		p = *params
+		if len(p.ColorStops) < 2 {
+			p.ColorStops = DefaultRenderParams().ColorStops
+		}
+	}
+	cmap := buildCmapLUT(p.ColorStops)
+
+	bounds := gray.Bounds()
+	img := image.NewRGBA(bounds)
+	for py := bounds.Min.Y; py < bounds.Max.Y; py++ {
+		grayOff := gray.PixOffset(bounds.Min.X, py)
+		rgbaOff := img.PixOffset(bounds.Min.X, py)
+		for px := bounds.Min.X; px < bounds.Max.X; px++ {
+			t := float64(gray.Pix[grayOff]) / 255
+			c := cmapLookup(&cmap, t)
+			img.Pix[rgbaOff] = c[0]
+			img.Pix[rgbaOff+1] = c[1]
+			img.Pix[rgbaOff+2] = c[2]
+			img.Pix[rgbaOff+3] = c[3]
+			grayOff++
+			rgbaOff += 4
+		}
+	}
+	return img
+}
+
+// RenderFanSampleGrid renders a sonar fan straight to a colorized RGBA image
+// (RenderFanSampleGridGray followed by ColorizeGray). Pass nil for params to
+// use DefaultRenderParams.
+func RenderFanSampleGrid(grid *FanSampleGrid, size int, params *RenderParams) (image.Image, error) {
+	gray, err := RenderFanSampleGridGray(grid, size, params)
+	if err != nil {
+		return nil, err
+	}
+	return ColorizeGray(gray, params), nil
 }

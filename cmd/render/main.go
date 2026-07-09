@@ -21,6 +21,7 @@ func main() {
 	size := flag.Int("size", 0, "image size in pixels (0 = default 1500)")
 	fps := flag.Int("fps", 3, "video frame rate")
 	paramsFile := flag.String("params", "", "optional JSON file with render params (dbPerCount, dbMin, dbMax, heatmapRangeSigmaFactor, heatmapArcSigmaFactor, heatmapMinThreshold, colorStops)")
+	pingPingFilter := flag.String("pingpingfilter", "medium", "ping-ping filter strength: off, weak, medium, strong")
 	flag.Parse()
 
 	var renderParams *sonar.RenderParams
@@ -42,6 +43,7 @@ func main() {
 	}
 	sonarImagesDir := filepath.Join(*outputDir, "sonar-images")
 	binaryImagesDir := filepath.Join(*outputDir, "images")
+	pingPingLevel := sonar.ParsePingPingLevel(*pingPingFilter)
 
 	if err := os.RemoveAll(sonarImagesDir); err != nil {
 		log.Fatalf("clear %s: %v", sonarImagesDir, err)
@@ -50,15 +52,29 @@ func main() {
 		log.Fatalf("mkdir %s: %v", sonarImagesDir, err)
 	}
 
+	// Only used (and only cleared/created) when the ping-ping filter is on —
+	// it's the intermediate grayscale signal image the filter blends on,
+	// written out here for inspection before it's colorized.
+	var signalImagesDir string
+	if pingPingLevel != sonar.PingPingOff {
+		signalImagesDir = filepath.Join(*outputDir, "sonar-signal")
+		if err := os.RemoveAll(signalImagesDir); err != nil {
+			log.Fatalf("clear %s: %v", signalImagesDir, err)
+		}
+		if err := os.MkdirAll(signalImagesDir, 0755); err != nil {
+			log.Fatalf("mkdir %s: %v", signalImagesDir, err)
+		}
+	}
+
 	fmt.Println("Rendering sonar images...")
-	rendered, skipped, err := sonar.RenderDirectory(tabularRoot, sonarImagesDir, *size, renderParams)
+	rendered, skipped, err := sonar.RenderDirectory(tabularRoot, sonarImagesDir, signalImagesDir, *size, renderParams, pingPingLevel)
 	if err != nil {
 		log.Fatalf("render: %v", err)
 	}
 	fmt.Printf("  %d rendered, %d skipped\n\n", rendered, skipped)
 
 	fmt.Println("Creating videos...")
-	videos, err := createVideos(sonarImagesDir, binaryImagesDir, *fps)
+	videos, err := createVideos(*fps, sonarImagesDir, binaryImagesDir, signalImagesDir)
 	if err != nil {
 		log.Fatalf("video: %v", err)
 	}
@@ -70,11 +86,15 @@ func main() {
 	fmt.Println("Done.")
 }
 
-// createVideos makes an MP4 for every image subdirectory under sonarImagesDir
-// and binaryImagesDir, returning the paths of successfully created videos.
-func createVideos(sonarImagesDir, binaryImagesDir string, fps int) ([]string, error) {
+// createVideos makes an MP4 for every image subdirectory under each of bases
+// (empty entries are skipped), returning the paths of successfully created
+// videos.
+func createVideos(fps int, bases ...string) ([]string, error) {
 	var videos []string
-	for _, base := range []string{sonarImagesDir, binaryImagesDir} {
+	for _, base := range bases {
+		if base == "" {
+			continue
+		}
 		entries, err := os.ReadDir(base)
 		if os.IsNotExist(err) {
 			continue
@@ -196,7 +216,6 @@ func probeVideoSize(path string) (w, h int, err error) {
 	h, err = strconv.Atoi(parts[1])
 	return w, h, err
 }
-
 
 // makeVideo encodes all images in inputDir into an MP4 at the given frame rate.
 // It uses sequential symlinks to handle filenames with special characters.

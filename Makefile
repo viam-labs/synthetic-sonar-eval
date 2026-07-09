@@ -4,6 +4,7 @@ OUTPUT        ?= output
 SEQUENCE_ID   ?=
 FPS           ?= 3
 PARAMS        ?=
+PINGPINGFILTER ?=
 TABULAR       ?=
 PART_ID       ?=
 ORG_ID        ?=
@@ -36,7 +37,7 @@ download:
 # point OUTPUT at the specific download to render, e.g.
 # make render OUTPUT=output/<part-id>/<hash>
 render:
-	go run ./cmd/render --output $(OUTPUT) --fps $(FPS) $(if $(PARAMS),--params $(PARAMS),) $(if $(TABULAR),--tabular $(TABULAR),)
+	go run ./cmd/render --output $(OUTPUT) --fps $(FPS) $(if $(PARAMS),--params $(PARAMS),) $(if $(TABULAR),--tabular $(TABULAR),) $(if $(PINGPINGFILTER),--pingpingfilter $(PINGPINGFILTER),)
 
 # ML detection is opt-in: pass DETECT=1 to also run the fish detector over the
 # fetched images/sonar frames (make markers PART_ID=<id> DETECT=1).
@@ -84,7 +85,7 @@ full:
 		$(if $(START),--start $(START),) $(if $(END),--end $(END),) \
 		$(if $(ORG_ID),--org-id $(ORG_ID),)); \
 	echo "== output dir: $$RUN_DIR =="; \
-	go run ./cmd/render --output $$RUN_DIR --fps $(FPS) $(if $(PARAMS),--params $(PARAMS),) $(if $(TABULAR),--tabular $(TABULAR),); \
+	go run ./cmd/render --output $$RUN_DIR --fps $(FPS) $(if $(PARAMS),--params $(PARAMS),) $(if $(TABULAR),--tabular $(TABULAR),) $(if $(PINGPINGFILTER),--pingpingfilter $(PINGPINGFILTER),); \
 	go run ./cmd/compare --output $$RUN_DIR --model-dir $(MODEL_DIR) --confidence $(CONFIDENCE) \
 		--results-dirname $(RESULTS_DIR) --fps $(FPS) --screenshot-strip-dist $(STRIP_DIST) \
 		$(if $(NO_VISUALIZE),--no-visualize,)
