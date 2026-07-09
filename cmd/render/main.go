@@ -20,7 +20,7 @@ func main() {
 	tabularDir := flag.String("tabular", "", "tabular JSON directory (default: <output>/tabular)")
 	size := flag.Int("size", 0, "image size in pixels (0 = default 1500)")
 	fps := flag.Int("fps", 3, "video frame rate")
-	paramsFile := flag.String("params", "", "optional JSON file with render params (dbPerCount, dbMin, dbMax, heatmapRangeSigmaFactor, heatmapArcSigmaFactor, heatmapMinThreshold, colorStops)")
+	paramsFile := flag.String("params", "", "optional JSON file with render params (heatmapRangeSigmaFactor, heatmapArcSigmaFactor, heatmapMinThreshold, splatKernel [gauss|cell], colorStops)")
 	pingPingFilter := flag.String("pingpingfilter", "medium", "ping-ping filter strength: off, weak, medium, strong")
 	flag.Parse()
 

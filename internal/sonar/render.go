@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"math"
+	"sort"
 )
 
 const (
@@ -32,10 +33,17 @@ var dbMin = -100.0
 // RenderParams controls the visual output of RenderFanSampleGrid.
 // Use DefaultRenderParams to get a fully populated value, then override as needed.
 type RenderParams struct {
-	HeatmapRangeSigmaFactor float64     `json:"heatmapRangeSigmaFactor"`
-	HeatmapArcSigmaFactor   float64     `json:"heatmapArcSigmaFactor"`
-	HeatmapMinThreshold     float64     `json:"heatmapMinThreshold"`
-	ColorStops              []ColorStop `json:"colorStops"`
+	HeatmapRangeSigmaFactor float64 `json:"heatmapRangeSigmaFactor"`
+	HeatmapArcSigmaFactor   float64 `json:"heatmapArcSigmaFactor"`
+	HeatmapMinThreshold     float64 `json:"heatmapMinThreshold"`
+	// SplatKernel selects how each amp sample is painted: "gauss" (default)
+	// splats an anisotropic Gaussian (sigma factors above apply); "cell"
+	// fills the sample's hard-edged beam×sample polar cell with its value,
+	// max-combined; "bilinear" scan-converts the polar amp grid to the
+	// cartesian image with bilinear interpolation in (beam, sample) space —
+	// tapered stroke edges, the classic sonar-display drawing style.
+	SplatKernel string      `json:"splatKernel"`
+	ColorStops  []ColorStop `json:"colorStops"`
 }
 
 // DefaultRenderParams returns the default rendering parameters.
@@ -44,6 +52,7 @@ func DefaultRenderParams() RenderParams {
 		HeatmapRangeSigmaFactor: 1.5,
 		HeatmapArcSigmaFactor:   0.5,
 		HeatmapMinThreshold:     0.03,
+		SplatKernel:             "gauss",
 		ColorStops: []ColorStop{
 			{0.00, 0, 0, 0},
 			{0.11, 0, 0, 200},
@@ -182,7 +191,8 @@ func fanExtent(grid *FanSampleGrid) (minH, spanH, maxV, spanV float64) {
 }
 
 // RenderFanSampleGridGray renders a sonar fan into a square 8-bit grayscale
-// "signal image" via Gaussian splatting: white (255) is the top of the
+// "signal image" via the configured SplatKernel (Gaussian splatting or hard
+// beam×sample cell fill): white (255) is the top of the
 // [DBMin, DBMax] display window, black (0) is at/below DBMin or below
 // HeatmapMinThreshold. This is the image the ping-ping filter blends on —
 // ColorizeGray then maps it through the color ramp for display. Pass nil for
@@ -241,7 +251,21 @@ func RenderFanSampleGridGray(grid *FanSampleGrid, size int, params *RenderParams
 	heat := make([]float64, size*size)
 	rangeWidthM := grid.RangePerSample * cosTilt
 
-	for key, v := range grid.Amps {
+	kernel := p.SplatKernel
+	if kernel == "" {
+		kernel = "gauss"
+	}
+	splatAmps := grid.Amps
+	switch kernel {
+	case "gauss", "cell":
+	case "bilinear":
+		scanConvertBilinear(grid, size, heat, minH, spanH, maxV, spanV)
+		splatAmps = nil // heat fully painted; skip the per-sample splat loop
+	default:
+		return nil, fmt.Errorf("unknown splatKernel %q (want \"gauss\", \"cell\" or \"bilinear\")", kernel)
+	}
+
+	for key, v := range splatAmps {
 		b, s, ok := ParseAmpKey(key)
 		if !ok {
 			continue
@@ -253,6 +277,57 @@ func RenderFanSampleGridGray(grid *FanSampleGrid, size int, params *RenderParams
 		}
 		if norm > 1 {
 			norm = 1
+		}
+
+		if kernel == "cell" {
+			// Radial bounds centered on the same range the Gaussian kernel
+			// centers its splat at, (s+1)*RangePerSample.
+			r0 := (float64(s) + 0.5) * grid.RangePerSample * cosTilt
+			r1 := (float64(s) + 1.5) * grid.RangePerSample * cosTilt
+			az0, az1 := azEdges[b], azEdges[b+1]
+			if az1 < az0 {
+				az0, az1 = az1, az0
+			}
+			azc := (az0 + az1) / 2
+
+			// Pixel bbox from the four cell corners, one pixel of margin
+			// for the arc bowing outside the corner chords.
+			minPx, maxPx := math.Inf(1), math.Inf(-1)
+			minPy, maxPy := math.Inf(1), math.Inf(-1)
+			for _, r := range [2]float64{r0, r1} {
+				for _, az := range [2]float64{az0, az1} {
+					azRad := az * math.Pi / 180
+					px, py := toPixelF(r*math.Sin(azRad), r*math.Cos(azRad))
+					minPx = math.Min(minPx, px)
+					maxPx = math.Max(maxPx, px)
+					minPy = math.Min(minPy, py)
+					maxPy = math.Max(maxPy, py)
+				}
+			}
+			x0 := max(int(math.Floor(minPx))-1, 0)
+			x1 := min(int(math.Ceil(maxPx))+1, size-1)
+			y0 := max(int(math.Floor(minPy))-1, 0)
+			y1 := min(int(math.Ceil(maxPy))+1, size-1)
+
+			for py := y0; py <= y1; py++ {
+				xV := maxV - float64(py)/float64(size)*spanV
+				for px := x0; px <= x1; px++ {
+					yV := minH + float64(px)/float64(size)*spanH
+					r := math.Hypot(xV, yV)
+					if r < r0 || r >= r1 {
+						continue
+					}
+					az := math.Atan2(yV, xV) * 180 / math.Pi
+					az -= 360 * math.Round((az-azc)/360)
+					if az < az0 || az >= az1 {
+						continue
+					}
+					if idx := py*size + px; heat[idx] < norm {
+						heat[idx] = norm
+					}
+				}
+			}
+			continue
 		}
 
 		bp_ := bp[b]
@@ -318,6 +393,89 @@ func RenderFanSampleGridGray(grid *FanSampleGrid, size int, params *RenderParams
 	}
 
 	return img, nil
+}
+
+// scanConvertBilinear paints the fan into heat by classic polar->cartesian
+// scan conversion: every pixel inside the fan looks up its fractional
+// (beam, sample) coordinate and bilinearly interpolates the four surrounding
+// cells' dB-window-normalized values. Cells absent from Amps (at/below the
+// frame noise floor) interpolate as 0, so stroke edges taper instead of
+// ending on hard cell boundaries.
+func scanConvertBilinear(grid *FanSampleGrid, size int, heat []float64, minH, spanH, maxV, spanV float64) {
+	nBeams, nSamples := grid.NBeams, grid.NSamples
+	dbSpan := dbMax - dbMin
+	normGrid := make([]float64, nBeams*nSamples)
+	for key, v := range grid.Amps {
+		b, s, ok := ParseAmpKey(key)
+		if !ok || b < 0 || b >= nBeams || s < 0 || s >= nSamples {
+			continue
+		}
+		db := float64(v) * dBPerCountCalibrated
+		norm := (db - dbMin) / dbSpan
+		if norm <= 0 {
+			continue
+		}
+		if norm > 1 {
+			norm = 1
+		}
+		normGrid[b*nSamples+s] = norm
+	}
+
+	az := grid.AZSorted
+	rps := grid.RangePerSample * grid.CosTilt
+	// A fan whose beams span (nearly) the full circle wraps around: pixels
+	// between the last and first beam interpolate across the seam.
+	fullCircle := az[nBeams-1]-az[0] > 300
+
+	for py := 0; py < size; py++ {
+		xV := maxV - float64(py)/float64(size)*spanV
+		rowOff := py * size
+		for px := 0; px < size; px++ {
+			yV := minH + float64(px)/float64(size)*spanH
+			// Sample s is centered at ground range (s+1)*rps (matching the
+			// other kernels), so the fractional sample coordinate is:
+			sf := math.Hypot(xV, yV)/rps - 1
+			if sf < 0 || sf > float64(nSamples-1) {
+				continue
+			}
+			a := math.Atan2(yV, xV) * 180 / math.Pi
+			for a < az[0] {
+				a += 360
+			}
+			for a >= az[0]+360 {
+				a -= 360
+			}
+			var b0, b1 int
+			var fb float64
+			if a <= az[nBeams-1] {
+				j := sort.SearchFloat64s(az, a)
+				if j == 0 {
+					b0, b1, fb = 0, 0, 0
+				} else {
+					b0, b1 = j-1, j
+					if az[b1] > az[b0] {
+						fb = (a - az[b0]) / (az[b1] - az[b0])
+					}
+				}
+			} else if fullCircle {
+				b0, b1 = nBeams-1, 0
+				fb = (a - az[nBeams-1]) / (az[0] + 360 - az[nBeams-1])
+			} else {
+				continue
+			}
+			s0 := int(sf)
+			fs := sf - float64(s0)
+			s1 := s0 + 1
+			if s1 >= nSamples {
+				s1 = nSamples - 1
+			}
+			v := (normGrid[b0*nSamples+s0]*(1-fs)+normGrid[b0*nSamples+s1]*fs)*(1-fb) +
+				(normGrid[b1*nSamples+s0]*(1-fs)+normGrid[b1*nSamples+s1]*fs)*fb
+			if v > heat[rowOff+px] {
+				heat[rowOff+px] = v
+			}
+		}
+	}
 }
 
 // ColorizeGray maps a grayscale signal image (see RenderFanSampleGridGray)
