@@ -74,8 +74,11 @@ func main() {
 	fmt.Printf("  %d rendered, %d skipped\n\n", rendered, skipped)
 
 	fmt.Println("Creating videos...")
-	videos, err := createVideos(*fps, sonarImagesDir, binaryImagesDir, signalImagesDir)
+	videos, err := createVideos(*fps, sonarImagesDir, binaryImagesDir)
 	if err != nil {
+		log.Fatalf("video: %v", err)
+	}
+	if _, err := createVideos(*fps, signalImagesDir); err != nil {
 		log.Fatalf("video: %v", err)
 	}
 
