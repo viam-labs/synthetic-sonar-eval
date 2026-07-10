@@ -3,6 +3,7 @@ package sonar
 import (
 	"encoding/json"
 	"fmt"
+	"image"
 	"image/png"
 	"io/fs"
 	"log"
@@ -41,12 +42,26 @@ func CountTabularFiles(tabularDir string) (int, error) {
 // to a heatmap PNG under sonarImagesDir (mirroring the relative path, with
 // ".json" swapped for ".png"), skipping files that already have a rendered
 // PNG. Progress is logged to stdout as it goes.
-func RenderDirectory(tabularDir, sonarImagesDir string, size int, params *RenderParams) (rendered, skipped int, err error) {
+//
+// When pingPingLevel != PingPingOff, each top-level subdirectory of
+// tabularDir (i.e. each sensor/resource stream) gets its own PingPingRenderer,
+// fed pings in the filesystem walk order — which relies on filenames sorting
+// chronologically within a stream. Pre-existing PNGs are still skipped for
+// resumability, but a skipped ping does not feed the filter's history, so
+// resuming a partially-rendered, ping-ping-filtered directory will restart
+// history at the first re-rendered ping rather than being frame-perfect.
+//
+// If signalImagesDir is non-empty and pingPingLevel != PingPingOff, the
+// blended grayscale signal image the filter ran on (before colorizing) is
+// also written there, mirroring the same relative path.
+func RenderDirectory(tabularDir, sonarImagesDir, signalImagesDir string, size int, params *RenderParams, pingPingLevel PingPingLevel) (rendered, skipped int, err error) {
 	total, err := CountTabularFiles(tabularDir)
 	if err != nil {
 		return 0, 0, err
 	}
 	fmt.Printf("  found %d tabular file(s) to render\n", total)
+
+	renderers := map[string]*PingPingRenderer{}
 
 	walkErr := filepath.WalkDir(tabularDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -93,7 +108,22 @@ func RenderDirectory(tabularDir, sonarImagesDir string, size int, params *Render
 			return nil
 		}
 
-		img, err := RenderFanSampleGrid(grid, size, params)
+		var img image.Image
+		var signal *image.Gray
+		if pingPingLevel == PingPingOff {
+			img, err = RenderFanSampleGrid(grid, size, params)
+		} else {
+			stream := rel
+			if idx := strings.IndexRune(rel, filepath.Separator); idx >= 0 {
+				stream = rel[:idx]
+			}
+			pr, ok := renderers[stream]
+			if !ok {
+				pr = &PingPingRenderer{Level: pingPingLevel, Params: params}
+				renderers[stream] = pr
+			}
+			img, signal, err = pr.Render(grid, size)
+		}
 		if err != nil {
 			log.Printf("warning: render %s: %v", path, err)
 			return nil
@@ -111,6 +141,22 @@ func RenderDirectory(tabularDir, sonarImagesDir string, size int, params *Render
 			return encErr
 		}
 		f.Close()
+
+		if signal != nil && signalImagesDir != "" {
+			signalPath := filepath.Join(signalImagesDir, strings.TrimSuffix(rel, ".json")+".png")
+			if err := os.MkdirAll(filepath.Dir(signalPath), 0755); err != nil {
+				return err
+			}
+			sf, err := os.Create(signalPath)
+			if err != nil {
+				return err
+			}
+			if encErr := png.Encode(sf, signal); encErr != nil {
+				sf.Close()
+				return encErr
+			}
+			sf.Close()
+		}
 
 		rendered++
 		if rendered%100 == 0 {

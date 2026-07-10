@@ -1,0 +1,129 @@
+{
+  "_label": "display_calibrated_bilinear_nms2",
+  "_note": "Calibrated vs screen1 screenshot targets 2026-07-09/10 (see kongsberg-training-utils/docs/render-calibration-roadmap.md). Run with --pingpingfilter medium. colorStops sampled from the SIMRAD legend bar measured across 99 screenshots; t=0 kept black for the black-background render.",
+  "splatKernel": "bilinear",
+  "radialPeakWindow": 2,
+  "heatmapMinThreshold": 0.125,
+  "colorStops": [
+    {
+      "t": 0.0,
+      "r": 0,
+      "g": 0,
+      "b": 0
+    },
+    {
+      "t": 0.125,
+      "r": 0,
+      "g": 169,
+      "b": 160
+    },
+    {
+      "t": 0.1736,
+      "r": 117,
+      "g": 238,
+      "b": 18
+    },
+    {
+      "t": 0.2222,
+      "r": 240,
+      "g": 176,
+      "b": 8
+    },
+    {
+      "t": 0.2708,
+      "r": 248,
+      "g": 7,
+      "b": 0
+    },
+    {
+      "t": 0.3194,
+      "r": 224,
+      "g": 1,
+      "b": 0
+    },
+    {
+      "t": 0.3681,
+      "r": 211,
+      "g": 0,
+      "b": 2
+    },
+    {
+      "t": 0.4167,
+      "r": 194,
+      "g": 1,
+      "b": 3
+    },
+    {
+      "t": 0.4653,
+      "r": 174,
+      "g": 2,
+      "b": 3
+    },
+    {
+      "t": 0.5139,
+      "r": 151,
+      "g": 0,
+      "b": 2
+    },
+    {
+      "t": 0.5625,
+      "r": 123,
+      "g": 3,
+      "b": 0
+    },
+    {
+      "t": 0.6111,
+      "r": 112,
+      "g": 50,
+      "b": 19
+    },
+    {
+      "t": 0.6597,
+      "r": 95,
+      "g": 34,
+      "b": 16
+    },
+    {
+      "t": 0.7083,
+      "r": 86,
+      "g": 34,
+      "b": 14
+    },
+    {
+      "t": 0.7569,
+      "r": 80,
+      "g": 35,
+      "b": 17
+    },
+    {
+      "t": 0.8056,
+      "r": 65,
+      "g": 18,
+      "b": 6
+    },
+    {
+      "t": 0.8542,
+      "r": 48,
+      "g": 17,
+      "b": 0
+    },
+    {
+      "t": 0.9028,
+      "r": 45,
+      "g": 15,
+      "b": 19
+    },
+    {
+      "t": 0.9514,
+      "r": 33,
+      "g": 0,
+      "b": 16
+    },
+    {
+      "t": 1.0,
+      "r": 32,
+      "g": 22,
+      "b": 23
+    }
+  ]
+}
