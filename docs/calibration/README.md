@@ -61,42 +61,38 @@ make download PART_ID=b073f310-deca-434b-9f87-8cb388f10316 \
 A *target* is a clean, comparable sonar view extracted from a screenshot. The extraction
 pipeline lives in **kongsberg-training-utils
 ([PR #153](https://github.com/viam-modules/kongsberg-training-utils/pull/153))** — see that
-PR for how each stage works and was validated. From its repo root, with its venv:
+PR for how each stage works and was validated. From its repo root, with its venv, one
+command runs the whole extraction (crop views → strip background → strip overlays) and
+prints a CHECKPOINTS block telling you what to eyeball:
 
 ```bash
-# 1. crop the two circular sonar views out of each screenshot (left.png / right.png per frame)
-python src/sonar/crop_sonar_views.py  <clip>/images/screen1     <targets>/views --debug
-
-# 2. black out the display background (same convention the detector was trained on)
-python src/sonar/strip_background.py  <targets>/views           <targets>/views_stripped
-
-# 3. remove UI overlays, keep only echo blobs (HSV gate + geometric rules)
-python src/sonar/strip_overlays.py    <targets>/views_stripped  <targets>/views_blobs --debug
+python src/sonar/build_targets.py  <clip>/images/screen1  <targets>
+# writes <targets>/{views, views_stripped, views_blobs} (+ _debug/ trees)
 ```
 
 Then two tools from **this repo** finish the job:
 
 ```bash
-# 4. measure the display's color palette from the on-screen legend bar
+# measure the display's color palette from the on-screen legend bar
 python tools/extract_palette.py  <clip>/images/screen1  <targets>/palette/palette.json \
     --debug-dir <targets>/palette
 
-# 5. invert the blob targets from display colors to grayscale signal space
+# invert the blob targets from display colors to grayscale signal space
 python tools/invert_targets.py   <targets>/views_blobs  <targets>/palette/palette.json \
     <targets>/views_signal
 ```
 
 **Checkpoints before trusting the targets:**
 
-- Step 1 prints `done: N ok, 0 partial, 0 skipped`; spot-check `<targets>/views/_debug/`
-  overlays (fitted circles on the two views).
-- Step 3: spot-check `_debug/` input|output side-by-sides — echo arcs intact, no UI
-  remnants (compass letters, tilt wedge, legend bar, rim tick-ring).
-- Step 4 prints the gate-valid window, e.g. `gate-valid u range: [0.125, 0.910] =
-  [-95.5, -67.2] dB`, and writes `palette_ramp.png` — it should look like the legend bar
-  on-screen (blue → green → yellow → red → dark tail). These two numbers are the
-  comparison window used by every metric; if they differ wildly from the above, the legend
-  detection failed.
+- `build_targets.py` streams each stage and ends with a CHECKPOINTS block: the crop stage
+  should report `0 partial, 0 skipped` (spot-check `<targets>/views/_debug/` fitted-circle
+  overlays), and `<targets>/views_blobs/_debug/` side-by-sides should show echo arcs
+  intact with no UI remnants (compass letters, tilt wedge, legend bar, rim tick-ring).
+- `extract_palette.py` prints the gate-valid window, e.g. `gate-valid u range:
+  [0.125, 0.910] = [-95.5, -67.2] dB`, and writes `palette_ramp.png` — it should look like
+  the legend bar on-screen (blue → green → yellow → red → dark tail). These two numbers
+  are the comparison window used by every metric; if they differ wildly from the above,
+  the legend detection failed.
 
 ## Step 3 — render and get the numbers
 
