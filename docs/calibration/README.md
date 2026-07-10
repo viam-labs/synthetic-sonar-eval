@@ -12,7 +12,7 @@ echo-area coverage **1.08×** the display's, intensity-distribution distance (EM
 **The two PRs:**
 
 - Renderer + metrics toolkit (this repo): [viam-labs/synthetic-sonar-eval#5](https://github.com/viam-labs/synthetic-sonar-eval/pull/5)
-- Target-building pipeline: [viam-modules/kongsberg-training-utils#153](https://github.com/viam-modules/kongsberg-training-utils/pull/153)
+- Target-building pipeline: [viam-modules/kongsberg-training-utils](https://github.com/viam-modules/kongsberg-training-utils)
 
 ![before](before_gauss_default.png)
 ![after](after_calibrated.png)
@@ -27,7 +27,7 @@ display palette. Top: old Gaussian default. Bottom: `display-calibrated.json`.*
 | what | detail |
 |---|---|
 | this repo | branch `render-kernels` (PR #5), Go ≥ 1.26 |
-| `kongsberg-training-utils` | branch of [PR #153](https://github.com/viam-modules/kongsberg-training-utils/pull/153); its `.venv` is also used to run every Python tool in this repo's `tools/` (needs `opencv-python`, `numpy`, `matplotlib`, `torch`) |
+| [`kongsberg-training-utils`](https://github.com/viam-modules/kongsberg-training-utils) | branch `crop-sonar-views` (until merged); its `.venv` is also used to run every Python tool in this repo's `tools/` (needs `opencv-python`, `numpy`, `matplotlib`, `torch`) |
 | Viam access | `viam` CLI logged in (for downloading sequences) |
 
 Below, `<clip>` is a downloaded sequence directory (e.g.
@@ -59,9 +59,10 @@ make download PART_ID=b073f310-deca-434b-9f87-8cb388f10316 \
 ## Step 2 — build the targets
 
 A *target* is a clean, comparable sonar view extracted from a screenshot. The extraction
-pipeline lives in **kongsberg-training-utils
-([PR #153](https://github.com/viam-modules/kongsberg-training-utils/pull/153))** — see that
-PR for how each stage works and was validated. From its repo root, with its venv, one
+pipeline lives in
+**[kongsberg-training-utils](https://github.com/viam-modules/kongsberg-training-utils)** —
+see that repo's README and `docs/render-calibration-roadmap.md` for how each stage works
+and was validated. From its repo root, with its venv, one
 command runs the whole extraction (crop views → strip background → strip overlays) and
 prints a CHECKPOINTS block telling you what to eyeball:
 
@@ -190,4 +191,4 @@ every run).
 ## Full history
 
 The decision log — every experiment, rejected hypothesis, and measured number — lives in
-`kongsberg-training-utils` at `docs/render-calibration-roadmap.md` (see PR #153).
+[`kongsberg-training-utils`](https://github.com/viam-modules/kongsberg-training-utils) at `docs/render-calibration-roadmap.md`.
