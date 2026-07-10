@@ -27,7 +27,8 @@ display palette. Top: old Gaussian default. Bottom: `display-calibrated.json`.*
 | what | detail |
 |---|---|
 | this repo | branch `render-kernels` (PR #5), Go ≥ 1.26 |
-| [`kongsberg-training-utils`](https://github.com/viam-modules/kongsberg-training-utils) | branch `crop-sonar-views` (until merged); its `.venv` is also used to run every Python tool in this repo's `tools/` (needs `opencv-python`, `numpy`, `matplotlib`, `torch`) |
+| [`kongsberg-training-utils`](https://github.com/viam-modules/kongsberg-training-utils) | for target extraction (its own `.venv` covers its dependencies) |
+| Python env for `tools/` | any Python ≥ 3.10 with `opencv-python`, `numpy`, `matplotlib` — nothing else; reusing the kongsberg-training-utils `.venv` works since it already has all three |
 | Viam access | `viam` CLI logged in (for downloading sequences) |
 
 Below, `<clip>` is a downloaded sequence directory (e.g.
