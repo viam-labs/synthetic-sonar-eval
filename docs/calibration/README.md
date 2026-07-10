@@ -9,7 +9,7 @@ committed as [`params/display-calibrated.json`](../../params/display-calibrated.
 echo-area coverage **1.08×** the display's, intensity-distribution distance (EMD)
 **0.61 dB**, stroke thickness within **3%**. Starting point was 10.2× / 3.38 dB.
 
-**The two PRs:**
+**Where the work lives:**
 
 - Renderer + metrics toolkit (this repo): [viam-labs/synthetic-sonar-eval#5](https://github.com/viam-labs/synthetic-sonar-eval/pull/5)
 - Target-building pipeline: [viam-modules/kongsberg-training-utils](https://github.com/viam-modules/kongsberg-training-utils)
