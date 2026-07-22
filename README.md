@@ -196,6 +196,8 @@ Optional flags:
 | `--fps` / `FPS` | `3` | Video frame rate |
 | `--size` | `1500` | Sonar image size in pixels |
 | `--tabular` / `TABULAR` | `<output>/tabular` | Tabular JSON input directory |
+| `--pingpingfilter` / `PINGPINGFILTER` | `medium` | Ping-ping temporal filter strength: `off`, `weak`, `medium`, `strong` |
+| `--signal-floor-db` / `SIGNALFLOORDB` | `-96` | Zero out rendered signal below this display dB, applied after the ping-ping filter — suppresses the low-intensity haze (weak arcs, noise rings) the vessel display doesn't draw. `-100` disables. Chosen by eye against screenshots on two clips (see `docs/calibration/README.md`) |
 
 ### 4. Detect (Path A)
 
