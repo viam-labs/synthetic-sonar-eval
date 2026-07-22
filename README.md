@@ -192,10 +192,12 @@ Optional flags:
 | Flag / Make var | Default | Description |
 |---|---|---|
 | `--output` / `OUTPUT` | `output` | Output directory (must match download) |
-| `--params` / `PARAMS` | _(none)_ | JSON file with render params (e.g. `params/blackbg.json`) |
+| `--params` / `PARAMS` | _(none)_ | JSON file with render params — presets in `params/` are versioned via a `_version` field; current is `params/display-calibrated-0.0.2.json` |
 | `--fps` / `FPS` | `3` | Video frame rate |
 | `--size` | `1500` | Sonar image size in pixels |
 | `--tabular` / `TABULAR` | `<output>/tabular` | Tabular JSON input directory |
+| `--pingpingfilter` / `PINGPINGFILTER` | `medium` | Ping-ping temporal filter strength: `off`, `weak`, `medium`, `strong` |
+| `--signal-floor-db` / `SIGNALFLOORDB` | `-96` | Zero out rendered signal below this display dB, applied after the ping-ping filter — suppresses the low-intensity haze (weak arcs, noise rings) the vessel display doesn't draw. `-100` disables. Chosen by eye against screenshots on two clips (see `docs/calibration/README.md`) |
 
 ### 4. Detect (Path A)
 

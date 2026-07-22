@@ -5,7 +5,8 @@ This documents how to reproduce, extend, or review the renderer-calibration work
 directly against screenshot-derived targets.
 
 **Status.** Calibrated on one 99-frame clip, left view (`horizontal-h` fan). Best config is
-committed as [`params/display-calibrated.json`](../../params/display-calibrated.json):
+committed as [`params/display-calibrated-0.0.2.json`](../../params/display-calibrated-0.0.2.json)
+(presets are versioned: 0.0.1 = kernel/NMS/palette calibration, 0.0.2 = + the −96 dB signal floor):
 echo-area coverage **1.08×** the display's, intensity-distribution distance (EMD)
 **0.61 dB**, stroke thickness within **3%**. Starting point was 10.2× / 3.38 dB.
 
@@ -18,7 +19,7 @@ echo-area coverage **1.08×** the display's, intensity-distribution distance (EM
 ![after](after_calibrated.png)
 
 *Panels: cropped screenshot view | blob-only target | render colorized through the measured
-display palette. Top: old Gaussian default. Bottom: `display-calibrated.json`.*
+display palette. Top: old Gaussian default. Bottom: `display-calibrated-0.0.1.json`.*
 
 ---
 
@@ -100,7 +101,7 @@ python tools/invert_targets.py   <targets>/views_blobs  <targets>/palette/palett
 
 ```bash
 # render all fans: writes colorized sonar-images/ AND grayscale sonar-signal/ (the metric input)
-make render OUTPUT=<clip> PARAMS=params/display-calibrated.json PINGPINGFILTER=medium
+make render OUTPUT=<clip> PARAMS=params/display-calibrated-0.0.2.json PINGPINGFILTER=medium
 
 # score the left view against the targets
 python tools/compare_1d.py <targets>/views_signal <clip>/sonar-signal/horizontal-h-sensor \
@@ -123,6 +124,56 @@ Also written: `per_frame.csv`, `pooled_hist.png` (target vs render intensity dis
 
 Small drifts (±0.1 coverage, ±0.1 dB) across re-downloads are normal (JPEG decode,
 timestamp pairing); order-of-magnitude changes are not.
+
+**Display-style signal floor.** Renders default to `--signal-floor-db -96`: signal
+below −96 dB is zeroed *after* the ping-ping filter (the pre-EMA `heatmapMinThreshold`
+cannot do this — EMA decay reintroduces sub-threshold ghosts). This suppresses the
+low-intensity haze (weak arcs, noise rings) that the vessel display doesn't draw but
+that dominates renders visually while counting zero in every windowed metric. The
+value was picked by eye with `tools/threshold_study.py` (per-frame
+`[screenshot | target | raw | ≥t…]` composites) on two clips — −96 sits just below
+this clip's gate window (−95.5), so metric numbers barely move. `-100` disables.
+Caveat from the second clip (G:21): its noise floor is higher and −96 leaves ring
+residue — a gain-dependent or adaptive floor is the open follow-up.
+
+### Component matching (spatial structure)
+
+> **Status 2026-07-22: metric-driven tuning is paused.** The matched/unmatched
+> decision is pixel-zone based (echo pixels within a dilation tolerance of the
+> other side's mask), not the explicit blob↔blob pairing the overlay suggests
+> is needed for review; and the visually dominant low-intensity haze counts
+> zero in every windowed metric. The tools remain for reference; the immediate
+> fix for the haze is the render-side `--signal-floor-db` (see below).
+
+`compare_1d.py`'s numbers are aggregates — coverage can be faked by fragmentation, and
+the histogram can't say *where* mass sits. `compare_components.py` matches echo structure
+spatially (same CLI shape):
+
+```bash
+python tools/compare_components.py <targets>/views_signal <clip>/sonar-signal/horizontal-h-sensor \
+    <targets>/palette/palette.json <out_dir> --side left
+```
+
+It derives intensity bands from the measured palette's hue transitions (green / yellow /
+orange / red on this skin), matches target↔render echo masks with a small spatial
+tolerance (`--tol-px`, default 6 ≈ one display stroke width), and reports per band:
+
+| field | meaning | value for this clip + preset |
+|---|---|---|
+| `mass_matched_frac_target` | display mass the render reproduces within tol (recall) | **0.67** |
+| `mass_matched_frac_render` | render mass the display actually draws (precision) | **0.71** |
+| `fragmentation_median` | render comps per target comp among matched clusters — speckle-gaming shows as ≫ 1 | **1.0** |
+| `bands[k].delta_db_median` | matched-component intensity delta, symmetric binning | green +0.3 → red **−3.9** |
+| `bands[k].delta_db_p90_median` | same on p90 (robust to the render's stroke-taper flanks) | red **−1.9** |
+| `bands[k].target_unmatched_render_state` | for missed display mass: is the render `silent` there or `sub_window` (energy just below the gate = under-driven)? | ~50/50 in every band |
+
+Matched fractions scale smoothly with `--tol-px` (0.50 @3 px → 0.77 @10 px) — treat them
+as *comparative* numbers at fixed tolerance, not absolute scores. Delta-dB is reported
+under symmetric binning (band of the target/render mean) because binning by target
+intensity alone imports a regression-to-the-mean artifact (~±1 dB on this clip).
+Also written: `delta_db.png`, `unmatched_mass.png`, `per_frame.png`, `per_component.csv`,
+and `eyeball/*.png` overlays (target-only blue, render-only orange, matched white) for
+the evenly-spaced, worst-miss, and worst-phantom frames.
 
 ![metric progression](metric_progression.png)
 
@@ -150,6 +201,7 @@ Writes per-frame `[screenshot | target | render]` composites + `composite.mp4`. 
 | tool | use it when |
 |---|---|
 | `tools/splat_sweep.sh <clip>` | grid-sweep render params, each config scored with compare_1d. Grid via env vars: `RANGES="0.5 1.0" ARCS="0.25" THRS="0.1" SKIP_PP=1 JOBS=6 bash tools/splat_sweep.sh <clip>`. Results → `collect_sweep.py` table ranked by \|log cov-ratio\|, EMD tiebreak |
+| `tools/gate_sweep.sh <clip>` | grid-sweep the gate/gain knobs (`heatmapMinThreshold` × `dbOffset` × `radialPeakWindow` × ping-ping), scored with compare_components + compare_1d. Grid via env vars: `THRS="0.125 0.05" OFFSETS="0 2 2.5" PPS="weak medium" NMSS="2" JOBS=6 bash tools/gate_sweep.sh <clip>`. Completed runs are skipped, so the grid extends across invocations. Results → `collect_gate_sweep.py`, ranked by matched mass |
 | `tools/angle_check.py` | suspected rotation/heading mismatch. Circular cross-correlation of angular echo profiles vs `heading_deg`. Verdict on this clip: median offset 1.4°, no heading dependence — no rotation correction |
 | `tools/shift_sweep.py` | test whether a residual mismatch is a constant dB offset (sweeps an offset, reports EMD + coverage vs shift). Used to rule out gain as the explanation for the skirt excess |
 
@@ -172,12 +224,30 @@ every run).
 
 ## Known gaps / where to pick up
 
-1. **Weak-band mapping** — the render places some weak echoes one intensity band above
-   where the display draws them (teal vs faint blue). Not tunable with aggregate metrics:
-   the target's legitimate weak-band mass (rims of strong arcs) is indistinguishable in a
-   histogram from standalone weak arcs. Needs a **component-matching metric** (pair target
-   arcs with render arcs; score matched/unmatched mass separately) — this is the next
-   highest-value piece of work, and it also hardens the sweeps against speckle-gaming.
+1. **Weak-band gap: quantified, then retuned (2026-07-13 gate/gain sweep)** — the
+   component-matching metric localized the residual mismatch, and
+   `tools/gate_sweep.sh` (threshold × `dbOffset` × NMS × ping-ping, 22 configs) tested
+   the knobs. What the sweep established:
+   - **Strong-echo coldness is a constant gain deficit and is fixed.** The matched-
+     component p90 delta climbs monotonically with `dbOffset` and crosses zero at
+     **+2.5 dB** (−1.9 → +0.14). No preset file is committed (repo decision: no new
+     config files) — set `"dbOffset": 2.5` in a params JSON to reproduce.
+     Caveat: measured at this clip's G:15 — a different display gain setting likely
+     needs a different offset (second-clip item below).
+   - **`heatmapMinThreshold` is not a lever**: it gates the final signal pre-EMA, so
+     lowering it only reveals sub-window arcs at their true values (green matched moved
+     < 1 pt from 0.125 → 0.05).
+   - **Ping-ping medium confirmed**: weak overshoots peaks by +4–6.5 dB and collapses
+     render-side precision to ~0.55. `radialPeakWindow` 3 gains nothing over 2.
+   - **The remaining weak-arc mismatch is structural, not gain**: mean matched mass is
+     flat (~0.69) at every offset — recall converts to precision loss ~1:1 (green
+     matched 0.52→0.59 target-side while 0.60→0.49 render-side). Display and render
+     disagree about *which* near-threshold arcs exist, not how bright they are.
+     Candidate mechanisms for whoever picks this up: display-side weak-echo processing
+     (persistence/despeckle), target under-count of anti-aliased weak arcs, EMA state
+     mismatch on moving fish; on dense-school frames the match overlays show
+     *interleaved* thin arcs (different ridge picks — see the NMS caveat below).
+     A second clip would also say how much of this is clip-specific.
 2. **Right view** — needs `h3-1/2/3` composited into one image in grayscale signal space
    (max-per-pixel is the first guess), then the same battery. Caution: on some frames the
    on-screen right view is *not* a composite; there is no marker for this yet, so expect
