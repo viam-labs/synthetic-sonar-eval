@@ -10,9 +10,15 @@ through the palette measured from the screen's legend bar
 regardless of the renderer's colorStops. Also assembles the frames into an
 MP4 for flipping through.
 
+With --match a fourth panel shows the component-matching view (same masks
+and tolerance as compare_components.py, whose code it imports): matched
+echo mass white, target-only blue, render-only orange. Requires
+views_signal/ under <targets_root> (invert_targets.py output).
+
 Usage:
     python visualize_result.py <targets_root> <render_signal_dir> <out_dir>
                                [--side left] [--label render] [--fps 3]
+                               [--match] [--match-tol-px 6]
 
 <targets_root> is the *_targets directory (expects views/, views_blobs/,
 palette/palette.json inside).
@@ -27,6 +33,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+
+from compare_components import BGR_MATCHED, BGR_RENDER, BGR_TARGET, disk_mask, echo_masks
 
 HEADER_H = 44
 SEP_W = 6
@@ -73,10 +81,18 @@ def main() -> None:
     parser.add_argument("--label", default="render", help="render panel title")
     parser.add_argument("--fps", type=int, default=3)
     parser.add_argument("--tolerance", type=float, default=0.6)
+    parser.add_argument("--match", action="store_true", help="add component-matching panel")
+    parser.add_argument("--match-tol-px", type=int, default=6)
+    parser.add_argument("--rim-frac", type=float, default=0.97)
     args = parser.parse_args()
 
     palette = json.loads((args.targets_root / "palette" / "palette.json").read_text())
     curve_bgr = np.array(palette["colors_rgb"], np.float64)[:, ::-1].astype(np.uint8)
+    u_min, u_max = palette["gate_u_min"], palette["gate_u_max"]
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * args.match_tol_px + 1, 2 * args.match_tol_px + 1)
+    )
+    disks: dict[tuple[int, int], np.ndarray] = {}
 
     targets = []
     for d in sorted((args.targets_root / "views").iterdir()):
@@ -119,6 +135,32 @@ def main() -> None:
             add_header(np.hstack([sep, blobs]), "target (blobs)"),
             add_header(np.hstack([sep, render]), args.label),
         ]
+        if args.match:
+            sig_path = (
+                args.targets_root / "views_signal" / tdir.name / f"{args.side}.png"
+            )
+            t_sig = cv2.imread(str(sig_path), cv2.IMREAD_GRAYSCALE)
+            if t_sig is None:
+                continue
+            r_sig = signal
+            if r_sig.shape != t_sig.shape:
+                r_sig = cv2.resize(
+                    r_sig, t_sig.shape[::-1], interpolation=cv2.INTER_AREA
+                )
+            if t_sig.shape not in disks:
+                disks[t_sig.shape] = disk_mask(t_sig.shape, args.rim_frac)
+            mm = echo_masks(t_sig, r_sig, disks[t_sig.shape], u_min, u_max, kernel)
+            overlay = np.zeros((*t_sig.shape, 3), np.uint8)
+            overlay[mm["matched_t"] | mm["matched_r"]] = BGR_MATCHED
+            overlay[mm["t_mask"] & ~mm["dil_r"]] = BGR_TARGET
+            overlay[mm["r_mask"] & ~mm["dil_t"]] = BGR_RENDER
+            overlay = cv2.resize(overlay, (h, h), interpolation=cv2.INTER_NEAREST)
+            panels.append(
+                add_header(
+                    np.hstack([sep, overlay]),
+                    "matched:white  target-only:blue  render-only:orange",
+                )
+            )
         frame = np.hstack(panels)
         stamp = ts.strftime("%H:%M:%S")
         cv2.putText(
