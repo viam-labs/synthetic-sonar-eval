@@ -20,8 +20,10 @@ func main() {
 	tabularDir := flag.String("tabular", "", "tabular JSON directory (default: <output>/tabular)")
 	size := flag.Int("size", 0, "image size in pixels (0 = default 1500)")
 	fps := flag.Int("fps", 3, "video frame rate")
-	paramsFile := flag.String("params", "", "optional JSON file with render params (heatmapRangeSigmaFactor, heatmapArcSigmaFactor, heatmapMinThreshold, splatKernel [gauss|cell], colorStops)")
+	paramsFile := flag.String("params", "", "optional JSON file with render params (heatmapRangeSigmaFactor, heatmapArcSigmaFactor, heatmapMinThreshold, splatKernel [gauss|cell|bilinear], radialPeakWindow, dbOffset, colorStops)")
 	pingPingFilter := flag.String("pingpingfilter", "medium", "ping-ping filter strength: off, weak, medium, strong")
+	signalFloorDB := flag.Float64("signal-floor-db", -96,
+		"zero out rendered signal below this display dB, after the ping-ping filter (display-style low-intensity suppression; -100 disables)")
 	flag.Parse()
 
 	var renderParams *sonar.RenderParams
@@ -67,7 +69,7 @@ func main() {
 	}
 
 	fmt.Println("Rendering sonar images...")
-	rendered, skipped, err := sonar.RenderDirectory(tabularRoot, sonarImagesDir, signalImagesDir, *size, renderParams, pingPingLevel)
+	rendered, skipped, err := sonar.RenderDirectory(tabularRoot, sonarImagesDir, signalImagesDir, *size, renderParams, pingPingLevel, *signalFloorDB)
 	if err != nil {
 		log.Fatalf("render: %v", err)
 	}

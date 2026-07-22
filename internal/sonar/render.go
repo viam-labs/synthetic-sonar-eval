@@ -49,8 +49,14 @@ type RenderParams struct {
 	// samples in range. The vendor display draws echoes radially thinner
 	// than their raw energy extent (~1 sample vs ~3 measured); this
 	// reproduces that sharpening.
-	RadialPeakWindow int         `json:"radialPeakWindow"`
-	ColorStops       []ColorStop `json:"colorStops"`
+	RadialPeakWindow int `json:"radialPeakWindow"`
+	// DBOffset is a constant gain in dB added to every sample before the
+	// [dbMin, dbMax] windowing (positive = hotter). The window itself is the
+	// vendor's fixed encoding; this absorbs display-side gain differences
+	// (component matching measured the render ~2 dB cold vs the screen at
+	// the display's G:15).
+	DBOffset   float64     `json:"dbOffset"`
+	ColorStops []ColorStop `json:"colorStops"`
 }
 
 // DefaultRenderParams returns the default rendering parameters.
@@ -73,6 +79,37 @@ func DefaultRenderParams() RenderParams {
 			{1.00, 110, 0, 0},
 		},
 	}
+}
+
+// SignalFloorGrayFromDB converts a display-dB floor to the 8-bit signal-image
+// cutoff (v/255 = u = (dB+100)/36): pixels strictly below the returned value
+// are display-side noise to suppress. dB <= -100 (the window bottom) returns
+// 0, which disables the floor.
+func SignalFloorGrayFromDB(db float64) uint8 {
+	cut := math.Ceil((db + 100.0) / 36.0 * 255.0)
+	if cut <= 0 {
+		return 0
+	}
+	if cut > 255 {
+		return 255
+	}
+	return uint8(cut)
+}
+
+// applySignalFloor returns img with pixels below floor zeroed (img itself
+// when floor is 0/off). The copy leaves the caller's image untouched so
+// ping-ping history can stay unfloored.
+func applySignalFloor(img *image.Gray, floor uint8) *image.Gray {
+	if floor == 0 {
+		return img
+	}
+	out := image.NewGray(img.Bounds())
+	for i, v := range img.Pix {
+		if v >= floor {
+			out.Pix[i] = v
+		}
+	}
+	return out
 }
 
 var gaussLUT [gaussLUTN + 1]float64
@@ -266,7 +303,7 @@ func RenderFanSampleGridGray(grid *FanSampleGrid, size int, params *RenderParams
 	switch kernel {
 	case "gauss", "cell":
 	case "bilinear":
-		scanConvertBilinear(grid, size, heat, minH, spanH, maxV, spanV, p.RadialPeakWindow)
+		scanConvertBilinear(grid, size, heat, minH, spanH, maxV, spanV, p.RadialPeakWindow, p.DBOffset)
 		splatAmps = nil // heat fully painted; skip the per-sample splat loop
 	default:
 		return nil, fmt.Errorf("unknown splatKernel %q (want \"gauss\", \"cell\" or \"bilinear\")", kernel)
@@ -277,7 +314,7 @@ func RenderFanSampleGridGray(grid *FanSampleGrid, size int, params *RenderParams
 		if !ok {
 			continue
 		}
-		db := float64(v) * dBPerCountCalibrated
+		db := float64(v)*dBPerCountCalibrated + p.DBOffset
 		norm := (db - dbMin) / dbSpan
 		if norm <= 0 {
 			continue
@@ -408,7 +445,7 @@ func RenderFanSampleGridGray(grid *FanSampleGrid, size int, params *RenderParams
 // cells' dB-window-normalized values. Cells absent from Amps (at/below the
 // frame noise floor) interpolate as 0, so stroke edges taper instead of
 // ending on hard cell boundaries.
-func scanConvertBilinear(grid *FanSampleGrid, size int, heat []float64, minH, spanH, maxV, spanV float64, radialPeakWindow int) {
+func scanConvertBilinear(grid *FanSampleGrid, size int, heat []float64, minH, spanH, maxV, spanV float64, radialPeakWindow int, dbOffset float64) {
 	nBeams, nSamples := grid.NBeams, grid.NSamples
 	dbSpan := dbMax - dbMin
 	normGrid := make([]float64, nBeams*nSamples)
@@ -417,7 +454,7 @@ func scanConvertBilinear(grid *FanSampleGrid, size int, heat []float64, minH, sp
 		if !ok || b < 0 || b >= nBeams || s < 0 || s >= nSamples {
 			continue
 		}
-		db := float64(v) * dBPerCountCalibrated
+		db := float64(v)*dBPerCountCalibrated + dbOffset
 		norm := (db - dbMin) / dbSpan
 		if norm <= 0 {
 			continue

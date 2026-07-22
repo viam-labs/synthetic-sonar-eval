@@ -54,7 +54,11 @@ func CountTabularFiles(tabularDir string) (int, error) {
 // If signalImagesDir is non-empty and pingPingLevel != PingPingOff, the
 // blended grayscale signal image the filter ran on (before colorizing) is
 // also written there, mirroring the same relative path.
-func RenderDirectory(tabularDir, sonarImagesDir, signalImagesDir string, size int, params *RenderParams, pingPingLevel PingPingLevel) (rendered, skipped int, err error) {
+//
+// signalFloorDB zeroes output signal below that display dB before writing
+// and colorizing (display-style low-intensity suppression; the ping-ping
+// blend history stays unfloored). Pass -100 or lower to disable.
+func RenderDirectory(tabularDir, sonarImagesDir, signalImagesDir string, size int, params *RenderParams, pingPingLevel PingPingLevel, signalFloorDB float64) (rendered, skipped int, err error) {
 	total, err := CountTabularFiles(tabularDir)
 	if err != nil {
 		return 0, 0, err
@@ -62,6 +66,7 @@ func RenderDirectory(tabularDir, sonarImagesDir, signalImagesDir string, size in
 	fmt.Printf("  found %d tabular file(s) to render\n", total)
 
 	renderers := map[string]*PingPingRenderer{}
+	signalFloor := SignalFloorGrayFromDB(signalFloorDB)
 
 	walkErr := filepath.WalkDir(tabularDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -111,7 +116,11 @@ func RenderDirectory(tabularDir, sonarImagesDir, signalImagesDir string, size in
 		var img image.Image
 		var signal *image.Gray
 		if pingPingLevel == PingPingOff {
-			img, err = RenderFanSampleGrid(grid, size, params)
+			var gray *image.Gray
+			gray, err = RenderFanSampleGridGray(grid, size, params)
+			if err == nil {
+				img = ColorizeGray(applySignalFloor(gray, signalFloor), params)
+			}
 		} else {
 			stream := rel
 			if idx := strings.IndexRune(rel, filepath.Separator); idx >= 0 {
@@ -119,7 +128,7 @@ func RenderDirectory(tabularDir, sonarImagesDir, signalImagesDir string, size in
 			}
 			pr, ok := renderers[stream]
 			if !ok {
-				pr = &PingPingRenderer{Level: pingPingLevel, Params: params}
+				pr = &PingPingRenderer{Level: pingPingLevel, Params: params, SignalFloorGray: signalFloor}
 				renderers[stream] = pr
 			}
 			img, signal, err = pr.Render(grid, size)

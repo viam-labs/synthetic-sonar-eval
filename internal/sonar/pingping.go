@@ -183,6 +183,11 @@ func sampleBilinearGray(img *image.Gray, x, y float64) (v float64, ok bool) {
 type PingPingRenderer struct {
 	Level  PingPingLevel
 	Params *RenderParams
+	// SignalFloorGray zeroes returned signal pixels below this gray value
+	// (display-style low-intensity suppression, see SignalFloorGrayFromDB).
+	// It applies to the output only — the blend history stays unfloored, so
+	// the filter dynamics are unchanged. 0 = off.
+	SignalFloorGray uint8
 
 	histImg  *image.Gray
 	histPose pingPose
@@ -213,7 +218,8 @@ func (r *PingPingRenderer) Render(grid *FanSampleGrid, size int) (rendered image
 	factor := pingPingBlendFactor(r.Level)
 	if !r.have || factor >= 1.0 {
 		r.histImg, r.histPose, r.have = cur, curPose, true
-		return ColorizeGray(cur, r.Params), cur, nil
+		display := applySignalFloor(cur, r.SignalFloorGray)
+		return ColorizeGray(display, r.Params), display, nil
 	}
 
 	out := image.NewGray(cur.Bounds())
@@ -235,5 +241,6 @@ func (r *PingPingRenderer) Render(grid *FanSampleGrid, size int) (rendered image
 	}
 
 	r.histImg, r.histPose, r.have = out, curPose, true
-	return ColorizeGray(out, r.Params), out, nil
+	display := applySignalFloor(out, r.SignalFloorGray)
+	return ColorizeGray(display, r.Params), display, nil
 }

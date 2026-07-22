@@ -5,6 +5,7 @@ SEQUENCE_ID   ?=
 FPS           ?= 3
 PARAMS        ?=
 PINGPINGFILTER ?=
+SIGNALFLOORDB ?=
 TABULAR       ?=
 PART_ID       ?=
 ORG_ID        ?=
@@ -37,7 +38,7 @@ download:
 # point OUTPUT at the specific download to render, e.g.
 # make render OUTPUT=output/<part-id>/<hash>
 render:
-	go run ./cmd/render --output $(OUTPUT) --fps $(FPS) $(if $(PARAMS),--params $(PARAMS),) $(if $(TABULAR),--tabular $(TABULAR),) $(if $(PINGPINGFILTER),--pingpingfilter $(PINGPINGFILTER),)
+	go run ./cmd/render --output $(OUTPUT) --fps $(FPS) $(if $(PARAMS),--params $(PARAMS),) $(if $(TABULAR),--tabular $(TABULAR),) $(if $(PINGPINGFILTER),--pingpingfilter $(PINGPINGFILTER),) $(if $(SIGNALFLOORDB),--signal-floor-db $(SIGNALFLOORDB),)
 
 # ML detection is opt-in: pass DETECT=1 to also run the fish detector over the
 # fetched images/sonar frames (make markers PART_ID=<id> DETECT=1).
