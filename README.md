@@ -192,7 +192,7 @@ Optional flags:
 | Flag / Make var | Default | Description |
 |---|---|---|
 | `--output` / `OUTPUT` | `output` | Output directory (must match download) |
-| `--params` / `PARAMS` | _(none)_ | JSON file with render params (e.g. `params/blackbg.json`) |
+| `--params` / `PARAMS` | _(none)_ | JSON file with render params — presets in `params/` are versioned via a `_version` field; current is `params/display-calibrated-0.0.2.json` |
 | `--fps` / `FPS` | `3` | Video frame rate |
 | `--size` | `1500` | Sonar image size in pixels |
 | `--tabular` / `TABULAR` | `<output>/tabular` | Tabular JSON input directory |

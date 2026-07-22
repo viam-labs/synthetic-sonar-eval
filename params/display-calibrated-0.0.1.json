@@ -1,4 +1,5 @@
 {
+  "_version": "0.0.1",
   "_label": "display_calibrated_bilinear_nms2",
   "_note": "Calibrated vs screen1 screenshot targets 2026-07-09/10 (see kongsberg-training-utils/docs/render-calibration-roadmap.md). Run with --pingpingfilter medium. colorStops sampled from the SIMRAD legend bar measured across 99 screenshots; t=0 kept black for the black-background render.",
   "splatKernel": "bilinear",

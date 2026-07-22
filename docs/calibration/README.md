@@ -5,7 +5,8 @@ This documents how to reproduce, extend, or review the renderer-calibration work
 directly against screenshot-derived targets.
 
 **Status.** Calibrated on one 99-frame clip, left view (`horizontal-h` fan). Best config is
-committed as [`params/display-calibrated.json`](../../params/display-calibrated.json):
+committed as [`params/display-calibrated-0.0.2.json`](../../params/display-calibrated-0.0.2.json)
+(presets are versioned: 0.0.1 = kernel/NMS/palette calibration, 0.0.2 = + the −96 dB signal floor):
 echo-area coverage **1.08×** the display's, intensity-distribution distance (EMD)
 **0.61 dB**, stroke thickness within **3%**. Starting point was 10.2× / 3.38 dB.
 
@@ -18,7 +19,7 @@ echo-area coverage **1.08×** the display's, intensity-distribution distance (EM
 ![after](after_calibrated.png)
 
 *Panels: cropped screenshot view | blob-only target | render colorized through the measured
-display palette. Top: old Gaussian default. Bottom: `display-calibrated.json`.*
+display palette. Top: old Gaussian default. Bottom: `display-calibrated-0.0.1.json`.*
 
 ---
 
@@ -100,7 +101,7 @@ python tools/invert_targets.py   <targets>/views_blobs  <targets>/palette/palett
 
 ```bash
 # render all fans: writes colorized sonar-images/ AND grayscale sonar-signal/ (the metric input)
-make render OUTPUT=<clip> PARAMS=params/display-calibrated.json PINGPINGFILTER=medium
+make render OUTPUT=<clip> PARAMS=params/display-calibrated-0.0.2.json PINGPINGFILTER=medium
 
 # score the left view against the targets
 python tools/compare_1d.py <targets>/views_signal <clip>/sonar-signal/horizontal-h-sensor \

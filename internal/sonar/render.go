@@ -55,8 +55,13 @@ type RenderParams struct {
 	// vendor's fixed encoding; this absorbs display-side gain differences
 	// (component matching measured the render ~2 dB cold vs the screen at
 	// the display's G:15).
-	DBOffset   float64     `json:"dbOffset"`
-	ColorStops []ColorStop `json:"colorStops"`
+	DBOffset float64 `json:"dbOffset"`
+	// SignalFloorDB, when set, zeroes rendered signal below this display dB
+	// after the ping-ping filter (see SignalFloorGrayFromDB; -100 disables).
+	// nil = not pinned by the preset; cmd/render's --signal-floor-db flag
+	// supplies the default and, when passed explicitly, overrides this.
+	SignalFloorDB *float64    `json:"signalFloorDB"`
+	ColorStops    []ColorStop `json:"colorStops"`
 }
 
 // DefaultRenderParams returns the default rendering parameters.
