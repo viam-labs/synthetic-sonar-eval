@@ -4,11 +4,14 @@ This documents how to reproduce, extend, or review the renderer-calibration work
 `synthetic-sonar-eval` renders match what the vessel's SIMRAD display draws, measured
 directly against screenshot-derived targets.
 
-**Status.** Calibrated on one 99-frame clip, left view (`horizontal-h` fan). Best config is
-committed as [`params/display-calibrated-0.0.2.json`](../../params/display-calibrated-0.0.2.json)
-(presets are versioned: 0.0.1 = kernel/NMS/palette calibration, 0.0.2 = + the −96 dB signal floor):
-echo-area coverage **1.08×** the display's, intensity-distribution distance (EMD)
-**0.61 dB**, stroke thickness within **3%**. Starting point was 10.2× / 3.38 dB.
+**Status.** Both views calibrated on the primary 99-frame clip. Best config is committed as
+[`params/display-calibrated-0.0.3.json`](../../params/display-calibrated-0.0.3.json)
+(presets are versioned: 0.0.1 = kernel/NMS/palette calibration, 0.0.2 = + the −96 dB signal
+floor, 0.0.3 = + the right-view composite — left-view output is byte-identical to 0.0.2).
+Left view (`horizontal-h` fan): echo-area coverage **1.08×** the display's,
+intensity-distribution distance (EMD) **0.61 dB**, stroke thickness within **3%**; starting
+point was 10.2× / 3.38 dB. Right view (`horizontal-h3-*` composite): see the right-view
+section below.
 
 **Where the work lives:**
 
@@ -101,7 +104,7 @@ python tools/invert_targets.py   <targets>/views_blobs  <targets>/palette/palett
 
 ```bash
 # render all fans: writes colorized sonar-images/ AND grayscale sonar-signal/ (the metric input)
-make render OUTPUT=<clip> PARAMS=params/display-calibrated-0.0.2.json PINGPINGFILTER=medium
+make render OUTPUT=<clip> PARAMS=params/display-calibrated-0.0.3.json PINGPINGFILTER=medium
 
 # score the left view against the targets
 python tools/compare_1d.py <targets>/views_signal <clip>/sonar-signal/horizontal-h-sensor \
@@ -196,19 +199,89 @@ Writes per-frame `[screenshot | target | render]` composites + `composite.mp4`. 
 - radially thick schools not split into concentric "onion rings" (known NMS risk — check
   the dense-school frames).
 
+## Right view — the h3 composite (calibrated 2026-07-23)
+
+The on-screen right view is the three `horizontal-h3-{1,2,3}` fans — full 360° rings at
+three tilts (33/23/13° on the primary clip) — drawn on one disk. With `compositeMode` set
+in the params JSON, the renderer skips the individual h3 streams and writes a combined
+`horizontal-h3-composite` stream instead (`sonar-images/` + `sonar-signal/`; the composite
+writes signal images even with the ping-ping filter off):
+
+- member fans render on one shared pixel window and are **max-combined per pixel in gray
+  signal space** — an echo is as bright as its brightest fan;
+- the combine happens **before** a single shared ping-ping history
+  (`compositeEmaPlacement: "pre"`; `"post"` keeps one history per fan and combines the
+  filtered frames — the 24-config matrix measured the two identical to the 3rd decimal);
+- member pings are grouped into frames by timestamp (~10 ms skew vs 1 s cadence); a
+  missing member renders from whatever is present, with a warning.
+
+The composite pixel window is **operator display state**, passed per clip on the CLI —
+deliberately not in the preset:
+
+| flag | primary clip | second clip | how to measure |
+|---|---|---|---|
+| `--composite-range-m` | `182` | `244.14` (= 801 ft) | read `R:` off a screenshot — mind the units |
+| `--composite-vessel-x` / `-y` | `0.443` / `0.489` | `0.588` / `0.497` | the display runs off-center mode: the vessel is *not* at the disk center (opposite side on the two clips). Locate the range-ring center on a crop, or phase-correlate render vs target |
+
+Calibrated composite params (in `display-calibrated-0.0.3.json`; all are overrides, so
+left-view rendering is untouched):
+
+- `compositeRadialPeakWindow: 0` — radial NMS **off**. The h3 sample pitch is 0.31 m vs
+  the left fan's 1.49 m, so NMS-thinned strokes are ~0.9 px in the 182 m window; bilinear
+  scan conversion attenuates them and coverage starves (matched mass halves at nms 2/5,
+  coverage ratio drops to 0.3–0.45). The NMS window is in *samples* — it does not
+  transfer between fans of different pitch.
+- `compositePingPingFilter: "weak"` — weak doubles matched mass over medium (0.037 vs
+  0.020 at off0) and reproduces the on-screen arc density (medium visibly drops arcs).
+  Weak's red-band p90 runs +4.1 dB hot — the known weak-EMA peak overshoot — which is
+  also why…
+- `compositeDbOffset: 0` — by the p90-crossing criterion the gain is right at 0. +2.5
+  lifts matched mass (0.048 vs 0.037) but only via coverage inflation (p90 → +7.3 dB),
+  the failure mode gain-by-matched-mass was already rejected for on the left view.
+
+Sweep + scoring (the matrix): `tools/right_sweep.sh` → `right_sweep/sweep_results.csv`
+(see the sweeps table below); visual check:
+
+```bash
+python tools/visualize_result.py <targets> <run>/sonar-signal/horizontal-h3-composite \
+    <viz_dir> --side right --match
+```
+
+**Read the absolute numbers with care.** Best-config matched mass is only ~0.04
+target-side on the primary clip, and that floor is mostly *target sparsity, not render
+error*: right-view content is dominated by weak echoes the display draws as dim
+blue/cyan, which the target pipeline strips as UI-blue (the metric blind spot above —
+judge those against the *screenshot* panel of the viz). The eyeballs tell the real
+story: the render reproduces the screenshot's echo clusters and school positions, and
+the per-frame residuals are ~10–20 m blob-center offsets consistent with
+display-vs-render persistence lag, not geometry. On the second clip, whose schools are
+strong enough to survive target stripping, the same preset matches **0.45 of target
+mass zero-shot** (different range, units, off-center side) — but that clip's G:21 noise
+floor floods the composite with in-window noise rings the display suppresses, and no
+constant floor fixes it (`--signal-floor-db -96` → 0.45 matched, `-90` → 0.22: the
+floor trades real echo for noise). The adaptive/gain-dependent floor stays the top
+open item.
+
+Right-view-specific residuals: the render paints ~2× the target's near-field mass
+within 27 m of the vessel (display-side near-field suppression; a candidate
+`compositeMinRangeM` follow-up), and on some frames the on-screen right view may not be
+a composite at all (no marker for it; shows up as isolated bad pairs).
+
 ## Optional — sweeps and diagnostics
 
 | tool | use it when |
 |---|---|
 | `tools/splat_sweep.sh <clip>` | grid-sweep render params, each config scored with compare_1d. Grid via env vars: `RANGES="0.5 1.0" ARCS="0.25" THRS="0.1" SKIP_PP=1 JOBS=6 bash tools/splat_sweep.sh <clip>`. Results → `collect_sweep.py` table ranked by \|log cov-ratio\|, EMD tiebreak |
 | `tools/gate_sweep.sh <clip>` | grid-sweep the gate/gain knobs (`heatmapMinThreshold` × `dbOffset` × `radialPeakWindow` × ping-ping), scored with compare_components + compare_1d. Grid via env vars: `THRS="0.125 0.05" OFFSETS="0 2 2.5" PPS="weak medium" NMSS="2" JOBS=6 bash tools/gate_sweep.sh <clip>`. Completed runs are skipped, so the grid extends across invocations. Results → `collect_gate_sweep.py`, ranked by matched mass |
-| `tools/angle_check.py` | suspected rotation/heading mismatch. Circular cross-correlation of angular echo profiles vs `heading_deg`. Verdict on this clip: median offset 1.4°, no heading dependence — no rotation correction |
+| `tools/right_sweep.sh <clip>` | grid-sweep the right-view composite knobs (EMA placement × `compositeRadialPeakWindow` × `compositeDbOffset` × ping-ping), scored with compare_components + compare_1d `--side right` on the `horizontal-h3-composite` stream. Grid via env vars: `EMAS="pre post" NMSS="0 2 5" OFFSETS="0 2.5" PPS="weak medium" JOBS=6 bash tools/right_sweep.sh <clip>`; window via `RANGE_M`/`VESSEL_X`/`VESSEL_Y` (defaults = primary clip). Completed runs are skipped. Results → `collect_gate_sweep.py`, ranked by matched mass |
+| `tools/angle_check.py` | suspected rotation/heading mismatch. Circular cross-correlation of angular echo profiles vs `heading_deg`. Verdict on this clip: median offset 1.4°, no heading dependence — no rotation correction (right view checked too: median −8.4° ≈ bin width) |
 | `tools/shift_sweep.py` | test whether a residual mismatch is a constant dB offset (sweeps an offset, reports EMD + coverage vs shift). Used to rule out gain as the explanation for the skirt excess |
 
 Two implementation notes that will save you an afternoon: ping-ping `off` cannot be
-scored — the renderer only writes `sonar-signal/` when the filter is on; and sweep renders
-must go to separate output dirs (the renderer clears `sonar-images/`/`sonar-signal/` on
-every run).
+scored — the renderer only writes `sonar-signal/` when the filter is on (exception: the
+`horizontal-h3-composite` stream always writes signal images); and sweep renders must go
+to separate output dirs (the renderer clears `sonar-images/`/`sonar-signal/` on every
+run).
 
 ## Metric blind spots (for reviewers)
 
@@ -248,10 +321,13 @@ every run).
      mismatch on moving fish; on dense-school frames the match overlays show
      *interleaved* thin arcs (different ridge picks — see the NMS caveat below).
      A second clip would also say how much of this is clip-specific.
-2. **Right view** — needs `h3-1/2/3` composited into one image in grayscale signal space
-   (max-per-pixel is the first guess), then the same battery. Caution: on some frames the
-   on-screen right view is *not* a composite; there is no marker for this yet, so expect
-   (and tolerate) bad pairs.
+2. **Right view — composited and calibrated (2026-07-23)**; see the right-view section
+   above and `params/display-calibrated-0.0.3.json`. What remains open there: the
+   matched-mass floor is target sparsity (blue-stripped weak echoes) plus persistence
+   lag, so metric-driven fine-tuning hits the same ceiling as item 1; the ~2× near-field
+   excess within 27 m (candidate `compositeMinRangeM`); and the second clip's G:21
+   in-window noise rings — the adaptive floor is now the top open item, with the new
+   data point that no constant floor works (−96 → 0.45 matched, −90 → 0.22).
 3. **NMS onion rings** — per-sample radial NMS can split a radially thick school into
    concentric ridges. If it proves objectionable, switch to per-run peak bands (one ridge
    per contiguous echo run along range).

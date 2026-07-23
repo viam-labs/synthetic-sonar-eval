@@ -58,7 +58,14 @@ func CountTabularFiles(tabularDir string) (int, error) {
 // signalFloorDB zeroes output signal below that display dB before writing
 // and colorizing (display-style low-intensity suppression; the ping-ping
 // blend history stays unfloored). Pass -100 or lower to disable.
-func RenderDirectory(tabularDir, sonarImagesDir, signalImagesDir string, size int, params *RenderParams, pingPingLevel PingPingLevel, signalFloorDB float64) (rendered, skipped int, err error) {
+//
+// When params.CompositeMode is set, the horizontal-h3-* member streams are
+// not rendered individually: their files are collected during the walk and
+// rendered afterwards as one combined stream (horizontal-h3-composite) on
+// the shared pixel window described by compositeWindow (see CompositeWindow).
+// The composite always writes signal images (even with the ping-ping filter
+// off).
+func RenderDirectory(tabularDir, sonarImagesDir, signalImagesDir string, size int, params *RenderParams, pingPingLevel PingPingLevel, signalFloorDB float64, compositeWindow CompositeWindow) (rendered, skipped int, err error) {
 	total, err := CountTabularFiles(tabularDir)
 	if err != nil {
 		return 0, 0, err
@@ -67,6 +74,8 @@ func RenderDirectory(tabularDir, sonarImagesDir, signalImagesDir string, size in
 
 	renderers := map[string]*PingPingRenderer{}
 	signalFloor := SignalFloorGrayFromDB(signalFloorDB)
+	compositeOn := params != nil && params.CompositeMode != ""
+	var memberFiles []timedFile
 
 	walkErr := filepath.WalkDir(tabularDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -80,6 +89,25 @@ func RenderDirectory(tabularDir, sonarImagesDir, signalImagesDir string, size in
 		if err != nil {
 			return err
 		}
+		stream := rel
+		if idx := strings.IndexRune(rel, filepath.Separator); idx >= 0 {
+			stream = rel[:idx]
+		}
+
+		// Composite members are collected here and rendered as one combined
+		// stream after the walk (the walk is lexicographic, so the member
+		// streams' files never interleave and can't be grouped in-stream).
+		if compositeOn && isCompositeMember(stream) {
+			stem := strings.TrimSuffix(d.Name(), ".json")
+			t, tsErr := parseStemTime(stem)
+			if tsErr != nil {
+				log.Printf("warning: composite: %s: %v", path, tsErr)
+				return nil
+			}
+			memberFiles = append(memberFiles, timedFile{t: t, stream: stream, path: path, stem: stem})
+			return nil
+		}
+
 		pngPath := filepath.Join(sonarImagesDir, strings.TrimSuffix(rel, ".json")+".png")
 
 		if _, err := os.Stat(pngPath); err == nil {
@@ -87,26 +115,11 @@ func RenderDirectory(tabularDir, sonarImagesDir, signalImagesDir string, size in
 			return nil
 		}
 
-		data, err := os.ReadFile(path)
-		if err != nil {
-			log.Printf("warning: read %s: %v", path, err)
+		grid, loadErr := loadFanGrid(path)
+		if loadErr != nil {
+			log.Printf("warning: %v", loadErr)
 			return nil
 		}
-
-		var dp RawRecord
-		if err := json.Unmarshal(data, &dp); err != nil {
-			log.Printf("warning: parse %s: %v", path, err)
-			return nil
-		}
-
-		var payload struct {
-			Readings FanSampleGrid `json:"readings"`
-		}
-		if err := json.Unmarshal(dp.Payload, &payload); err != nil {
-			log.Printf("warning: parse payload %s: %v", path, err)
-			return nil
-		}
-		grid := &payload.Readings
 
 		if grid.NBeams == 0 || grid.NSamples == 0 {
 			log.Printf("warning: empty grid in %s, skipping", path)
@@ -122,10 +135,6 @@ func RenderDirectory(tabularDir, sonarImagesDir, signalImagesDir string, size in
 				img = ColorizeGray(applySignalFloor(gray, signalFloor), params)
 			}
 		} else {
-			stream := rel
-			if idx := strings.IndexRune(rel, filepath.Separator); idx >= 0 {
-				stream = rel[:idx]
-			}
 			pr, ok := renderers[stream]
 			if !ok {
 				pr = &PingPingRenderer{Level: pingPingLevel, Params: params, SignalFloorGray: signalFloor}
@@ -138,33 +147,15 @@ func RenderDirectory(tabularDir, sonarImagesDir, signalImagesDir string, size in
 			return nil
 		}
 
-		if err := os.MkdirAll(filepath.Dir(pngPath), 0755); err != nil {
+		if err := writePNG(pngPath, img); err != nil {
 			return err
 		}
-		f, err := os.Create(pngPath)
-		if err != nil {
-			return err
-		}
-		if encErr := png.Encode(f, img); encErr != nil {
-			f.Close()
-			return encErr
-		}
-		f.Close()
 
 		if signal != nil && signalImagesDir != "" {
 			signalPath := filepath.Join(signalImagesDir, strings.TrimSuffix(rel, ".json")+".png")
-			if err := os.MkdirAll(filepath.Dir(signalPath), 0755); err != nil {
+			if err := writePNG(signalPath, signal); err != nil {
 				return err
 			}
-			sf, err := os.Create(signalPath)
-			if err != nil {
-				return err
-			}
-			if encErr := png.Encode(sf, signal); encErr != nil {
-				sf.Close()
-				return encErr
-			}
-			sf.Close()
 		}
 
 		rendered++
@@ -173,5 +164,54 @@ func RenderDirectory(tabularDir, sonarImagesDir, signalImagesDir string, size in
 		}
 		return nil
 	})
-	return rendered, skipped, walkErr
+	if walkErr != nil {
+		return rendered, skipped, walkErr
+	}
+
+	if compositeOn && len(memberFiles) > 0 {
+		compRendered, compSkipped, compErr := renderCompositeFrames(
+			memberFiles, sonarImagesDir, signalImagesDir, size, params, pingPingLevel, signalFloor, compositeWindow)
+		rendered += compRendered
+		skipped += compSkipped
+		if compErr != nil {
+			return rendered, skipped, compErr
+		}
+	}
+	return rendered, skipped, nil
+}
+
+// loadFanGrid reads a RawRecord tabular JSON file and returns its
+// FanSampleGrid payload.
+func loadFanGrid(path string) (*FanSampleGrid, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var dp RawRecord
+	if err := json.Unmarshal(data, &dp); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	var payload struct {
+		Readings FanSampleGrid `json:"readings"`
+	}
+	if err := json.Unmarshal(dp.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("parse payload %s: %w", path, err)
+	}
+	return &payload.Readings, nil
+}
+
+// writePNG writes img to path, creating parent directories as needed.
+func writePNG(path string, img image.Image) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	if err := png.Encode(f, img); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }

@@ -1,0 +1,136 @@
+{
+  "_version": "0.0.3",
+  "_label": "display_calibrated_right_composite",
+  "_note": "0.0.2 + right-view composite calibration (2026-07-23, primary clip 7931d1d96b8d, 24-config right_sweep matrix + per-frame eyeball): the horizontal-h3-* fans max-combined per pixel in gray signal space, combined before one shared ping-ping history (pre vs post EMA placement measured identical to the 3rd decimal). compositeRadialPeakWindow 0: the h3 sample pitch (0.31 m) makes NMS strokes sub-pixel and starves coverage (matched mass 0.048 vs 0.019 at nms2); the window is in samples, so this does NOT transfer from the left fan's radialPeakWindow 2. compositePingPingFilter weak: weak doubles matched mass over medium and matches the on-screen arc density; its +4 dB red-band p90 heat is the known weak-EMA peak overshoot, so compositeDbOffset stays 0 (gain picked by p90 criterion, not matched mass - off2.5 lifts matched mass via coverage inflation only). The composite window is operator display state, NOT in this preset - pass per clip: --composite-range-m (primary 182, second clip 244.14 = 801 ft) and --composite-vessel-x/-y (display off-center mode; primary 0.443/0.489, second 0.588/0.497; measure via ring-center or phase correlation, see docs/calibration/README.md).",
+  "splatKernel": "bilinear",
+  "radialPeakWindow": 2,
+  "heatmapMinThreshold": 0.125,
+  "signalFloorDB": -96,
+  "compositeMode": "max",
+  "compositeEmaPlacement": "pre",
+  "compositeRadialPeakWindow": 0,
+  "compositeDbOffset": 0.0,
+  "compositePingPingFilter": "weak",
+  "colorStops": [
+    {
+      "t": 0.0,
+      "r": 0,
+      "g": 0,
+      "b": 0
+    },
+    {
+      "t": 0.125,
+      "r": 0,
+      "g": 169,
+      "b": 160
+    },
+    {
+      "t": 0.1736,
+      "r": 117,
+      "g": 238,
+      "b": 18
+    },
+    {
+      "t": 0.2222,
+      "r": 240,
+      "g": 176,
+      "b": 8
+    },
+    {
+      "t": 0.2708,
+      "r": 248,
+      "g": 7,
+      "b": 0
+    },
+    {
+      "t": 0.3194,
+      "r": 224,
+      "g": 1,
+      "b": 0
+    },
+    {
+      "t": 0.3681,
+      "r": 211,
+      "g": 0,
+      "b": 2
+    },
+    {
+      "t": 0.4167,
+      "r": 194,
+      "g": 1,
+      "b": 3
+    },
+    {
+      "t": 0.4653,
+      "r": 174,
+      "g": 2,
+      "b": 3
+    },
+    {
+      "t": 0.5139,
+      "r": 151,
+      "g": 0,
+      "b": 2
+    },
+    {
+      "t": 0.5625,
+      "r": 123,
+      "g": 3,
+      "b": 0
+    },
+    {
+      "t": 0.6111,
+      "r": 112,
+      "g": 50,
+      "b": 19
+    },
+    {
+      "t": 0.6597,
+      "r": 95,
+      "g": 34,
+      "b": 16
+    },
+    {
+      "t": 0.7083,
+      "r": 86,
+      "g": 34,
+      "b": 14
+    },
+    {
+      "t": 0.7569,
+      "r": 80,
+      "g": 35,
+      "b": 17
+    },
+    {
+      "t": 0.8056,
+      "r": 65,
+      "g": 18,
+      "b": 6
+    },
+    {
+      "t": 0.8542,
+      "r": 48,
+      "g": 17,
+      "b": 0
+    },
+    {
+      "t": 0.9028,
+      "r": 45,
+      "g": 15,
+      "b": 19
+    },
+    {
+      "t": 0.9514,
+      "r": 33,
+      "g": 0,
+      "b": 16
+    },
+    {
+      "t": 1.0,
+      "r": 32,
+      "g": 22,
+      "b": 23
+    }
+  ]
+}

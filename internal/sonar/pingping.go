@@ -72,7 +72,17 @@ type pingPose struct {
 }
 
 func poseFromGrid(grid *FanSampleGrid, size int) pingPose {
+	return poseFromGridExt(grid, size, nil)
+}
+
+// poseFromGridExt anchors the pose to an explicit pixel window instead of the
+// grid's own fan extent (composite frames share one fixed window; the pose
+// must carry it or history would be re-projected against the wrong geometry).
+func poseFromGridExt(grid *FanSampleGrid, size int, ext *FanExtent) pingPose {
 	minH, spanH, maxV, spanV := fanExtent(grid)
+	if ext != nil {
+		minH, spanH, maxV, spanV = ext.MinH, ext.SpanH, ext.MaxV, ext.SpanV
+	}
 	return pingPose{
 		lat:        grid.Latitude,
 		lon:        grid.Longitude,
@@ -213,13 +223,22 @@ func (r *PingPingRenderer) Render(grid *FanSampleGrid, size int) (rendered image
 	if err != nil {
 		return nil, nil, err
 	}
-	curPose := poseFromGrid(grid, size)
 
+	out := r.blendGray(cur, poseFromGrid(grid, size), size)
+	display := applySignalFloor(out, r.SignalFloorGray)
+	return ColorizeGray(display, r.Params), display, nil
+}
+
+// blendGray blends cur (anchored at curPose) into the filter's running
+// history and returns the blended, unfloored gray, updating the history for
+// the next call. With no history yet, or a blend factor >= 1 (filter off),
+// cur itself is stored and returned. The returned image IS the new history —
+// callers must not mutate it.
+func (r *PingPingRenderer) blendGray(cur *image.Gray, curPose pingPose, size int) *image.Gray {
 	factor := pingPingBlendFactor(r.Level)
 	if !r.have || factor >= 1.0 {
 		r.histImg, r.histPose, r.have = cur, curPose, true
-		display := applySignalFloor(cur, r.SignalFloorGray)
-		return ColorizeGray(display, r.Params), display, nil
+		return cur
 	}
 
 	out := image.NewGray(cur.Bounds())
@@ -241,6 +260,5 @@ func (r *PingPingRenderer) Render(grid *FanSampleGrid, size int) (rendered image
 	}
 
 	r.histImg, r.histPose, r.have = out, curPose, true
-	display := applySignalFloor(out, r.SignalFloorGray)
-	return ColorizeGray(display, r.Params), display, nil
+	return out
 }
