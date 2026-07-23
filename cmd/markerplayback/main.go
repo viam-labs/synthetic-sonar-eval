@@ -445,7 +445,7 @@ func main() {
 	tabularDir := filepath.Join(dir, "tabular")
 	sonarImagesDir := filepath.Join(dir, "sonar-images")
 	fmt.Println("Rendering sonar frames...")
-	rendered, renderSkipped, err := sonar.RenderDirectory(tabularDir, sonarImagesDir, "", 500, nil, sonar.PingPingOff, -100)
+	rendered, renderSkipped, err := sonar.RenderDirectory(tabularDir, sonarImagesDir, "", 500, nil, sonar.PingPingOff, -100, sonar.CompositeWindow{})
 	if err != nil {
 		log.Fatalf("render sonar: %v", err)
 	}

@@ -20,10 +20,16 @@ func main() {
 	tabularDir := flag.String("tabular", "", "tabular JSON directory (default: <output>/tabular)")
 	size := flag.Int("size", 0, "image size in pixels (0 = default 1500)")
 	fps := flag.Int("fps", 3, "video frame rate")
-	paramsFile := flag.String("params", "", "optional JSON file with render params (heatmapRangeSigmaFactor, heatmapArcSigmaFactor, heatmapMinThreshold, splatKernel [gauss|cell|bilinear], radialPeakWindow, dbOffset, colorStops)")
+	paramsFile := flag.String("params", "", "optional JSON file with render params (heatmapRangeSigmaFactor, heatmapArcSigmaFactor, heatmapMinThreshold, splatKernel [gauss|cell|bilinear], radialPeakWindow, dbOffset, signalFloorDB, colorStops, compositeMode [max], compositeEmaPlacement [pre|post], compositeRadialPeakWindow, compositeDbOffset)")
 	pingPingFilter := flag.String("pingpingfilter", "medium", "ping-ping filter strength: off, weak, medium, strong")
 	signalFloorDB := flag.Float64("signal-floor-db", -96,
 		"zero out rendered signal below this display dB, after the ping-ping filter (display-style low-intensity suppression; -100 disables; passing this explicitly overrides the params JSON's signalFloorDB)")
+	compositeRangeM := flag.Float64("composite-range-m", 0,
+		"ground-range radius in meters of the composite pixel window — the display's right-view range setting, clip-specific; 0 derives the members' full data disk; used only when the params JSON sets compositeMode")
+	compositeVesselX := flag.Float64("composite-vessel-x", 0.5,
+		"fractional horizontal position of the vessel in the composite window (display off-center mode, clip-specific); 0.5 = centered")
+	compositeVesselY := flag.Float64("composite-vessel-y", 0.5,
+		"fractional vertical position of the vessel in the composite window (display off-center mode, clip-specific); 0.5 = centered")
 	flag.Parse()
 
 	var renderParams *sonar.RenderParams
@@ -56,9 +62,12 @@ func main() {
 
 	// Only used (and only cleared/created) when the ping-ping filter is on —
 	// it's the intermediate grayscale signal image the filter blends on,
-	// written out here for inspection before it's colorized.
+	// written out here for inspection before it's colorized. The composite
+	// stream writes signal images even with the filter off (it's what the
+	// right-view metrics score).
+	compositeOn := renderParams != nil && renderParams.CompositeMode != ""
 	var signalImagesDir string
-	if pingPingLevel != sonar.PingPingOff {
+	if pingPingLevel != sonar.PingPingOff || compositeOn {
 		signalImagesDir = filepath.Join(*outputDir, "sonar-signal")
 		if err := os.RemoveAll(signalImagesDir); err != nil {
 			log.Fatalf("clear %s: %v", signalImagesDir, err)
@@ -81,7 +90,8 @@ func main() {
 		floorDB = *renderParams.SignalFloorDB
 	}
 
-	rendered, skipped, err := sonar.RenderDirectory(tabularRoot, sonarImagesDir, signalImagesDir, *size, renderParams, pingPingLevel, floorDB)
+	compositeWindow := sonar.CompositeWindow{RangeM: *compositeRangeM, VesselX: *compositeVesselX, VesselY: *compositeVesselY}
+	rendered, skipped, err := sonar.RenderDirectory(tabularRoot, sonarImagesDir, signalImagesDir, *size, renderParams, pingPingLevel, floorDB, compositeWindow)
 	if err != nil {
 		log.Fatalf("render: %v", err)
 	}

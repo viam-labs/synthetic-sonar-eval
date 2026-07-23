@@ -60,8 +60,31 @@ type RenderParams struct {
 	// after the ping-ping filter (see SignalFloorGrayFromDB; -100 disables).
 	// nil = not pinned by the preset; cmd/render's --signal-floor-db flag
 	// supplies the default and, when passed explicitly, overrides this.
-	SignalFloorDB *float64    `json:"signalFloorDB"`
-	ColorStops    []ColorStop `json:"colorStops"`
+	SignalFloorDB *float64 `json:"signalFloorDB"`
+	// CompositeMode, when set, combines the horizontal-h3-* member fans into
+	// one right-view stream (horizontal-h3-composite) on a shared fixed pixel
+	// window instead of rendering them individually: "max" keeps the
+	// per-pixel maximum in gray signal space. "" = off (default; member fans
+	// render as their own streams, unchanged).
+	CompositeMode string `json:"compositeMode"`
+	// CompositeEMAPlacement places the ping-ping filter relative to the fan
+	// combine: "pre" (default) combines the member fans first and blends the
+	// composite against a single history; "post" keeps one history per
+	// member fan and combines the filtered frames.
+	CompositeEMAPlacement string `json:"compositeEmaPlacement"`
+	// CompositeRadialPeakWindow and CompositeDBOffset override
+	// RadialPeakWindow / DBOffset for composite member rendering only
+	// (nil = inherit). The h3 fans' range-sample pitch differs from the
+	// single fan's (~5x finer on the calibration clip), so the NMS window
+	// calibrates separately per view.
+	CompositeRadialPeakWindow *int     `json:"compositeRadialPeakWindow"`
+	CompositeDBOffset         *float64 `json:"compositeDbOffset"`
+	// CompositePingPingFilter overrides the --pingpingfilter level for the
+	// composite stream only ("" = inherit the flag): "off", "weak",
+	// "medium" or "strong". The right view calibrated to a different
+	// persistence than the left view.
+	CompositePingPingFilter string      `json:"compositePingPingFilter"`
+	ColorStops              []ColorStop `json:"colorStops"`
 }
 
 // DefaultRenderParams returns the default rendering parameters.
@@ -239,6 +262,34 @@ func fanExtent(grid *FanSampleGrid) (minH, spanH, maxV, spanV float64) {
 	return minH, spanH, maxV, spanV
 }
 
+// FanExtent overrides the auto-computed per-fan pixel window (see fanExtent)
+// so multiple fans can be rendered onto one shared, fixed window.
+type FanExtent struct {
+	MinH, SpanH, MaxV, SpanV float64
+}
+
+// SquareExtent is the pixel window of a square covering ±radiusM meters of
+// ground range around the sensor — the fixed disk that composite frames
+// share (the display's right-view range setting).
+func SquareExtent(radiusM float64) FanExtent {
+	return OffCenterSquareExtent(radiusM, 0.5, 0.5)
+}
+
+// OffCenterSquareExtent is a square window of half-size radiusM meters with
+// the vessel placed at fractional position (fx right-of-left-edge, fy
+// down-from-top-edge) instead of the center — the display's off-center mode.
+// fx/fy <= 0 default to 0.5.
+func OffCenterSquareExtent(radiusM, fx, fy float64) FanExtent {
+	if fx <= 0 {
+		fx = 0.5
+	}
+	if fy <= 0 {
+		fy = 0.5
+	}
+	span := 2 * radiusM
+	return FanExtent{MinH: -fx * span, SpanH: span, MaxV: fy * span, SpanV: span}
+}
+
 // RenderFanSampleGridGray renders a sonar fan into a square 8-bit grayscale
 // "signal image" via the configured SplatKernel (Gaussian splatting or hard
 // beam×sample cell fill): white (255) is the top of the
@@ -247,6 +298,12 @@ func fanExtent(grid *FanSampleGrid) (minH, spanH, maxV, spanV float64) {
 // ColorizeGray then maps it through the color ramp for display. Pass nil for
 // params to use DefaultRenderParams.
 func RenderFanSampleGridGray(grid *FanSampleGrid, size int, params *RenderParams) (*image.Gray, error) {
+	return renderFanSampleGridGrayExt(grid, size, params, nil)
+}
+
+// renderFanSampleGridGrayExt is RenderFanSampleGridGray with an optional
+// pixel-window override (nil = the fan's own extent, the normal case).
+func renderFanSampleGridGrayExt(grid *FanSampleGrid, size int, params *RenderParams, ext *FanExtent) (*image.Gray, error) {
 	if grid == nil {
 		return nil, fmt.Errorf("fan sample grid is required")
 	}
@@ -266,6 +323,9 @@ func RenderFanSampleGridGray(grid *FanSampleGrid, size int, params *RenderParams
 
 	azEdges := fanAzEdges(grid)
 	minH, spanH, maxV, spanV := fanExtent(grid)
+	if ext != nil {
+		minH, spanH, maxV, spanV = ext.MinH, ext.SpanH, ext.MaxV, ext.SpanV
+	}
 
 	metersPerPixH := spanH / float64(size)
 	metersPerPixV := spanV / float64(size)
