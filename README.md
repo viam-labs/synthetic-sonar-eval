@@ -192,12 +192,14 @@ Optional flags:
 | Flag / Make var | Default | Description |
 |---|---|---|
 | `--output` / `OUTPUT` | `output` | Output directory (must match download) |
-| `--params` / `PARAMS` | _(none)_ | JSON file with render params — presets in `params/` are versioned via a `_version` field; current is `params/display-calibrated-0.0.2.json` |
+| `--params` / `PARAMS` | _(none)_ | JSON file with render params — presets in `params/` are versioned via a `_version` field; current is `params/display-calibrated-0.0.3.json`. The `composite*` fields (`compositeMode`, `compositeEmaPlacement`, `compositeRadialPeakWindow`, `compositeDbOffset`, `compositePingPingFilter`) enable and tune the right-view `horizontal-h3-composite` stream and are JSON-only (no flag counterparts) |
 | `--fps` / `FPS` | `3` | Video frame rate |
 | `--size` | `1500` | Sonar image size in pixels |
 | `--tabular` / `TABULAR` | `<output>/tabular` | Tabular JSON input directory |
 | `--pingpingfilter` / `PINGPINGFILTER` | `medium` | Ping-ping temporal filter strength: `off`, `weak`, `medium`, `strong` |
 | `--signal-floor-db` / `SIGNALFLOORDB` | `-96` | Zero out rendered signal below this display dB, applied after the ping-ping filter — suppresses the low-intensity haze (weak arcs, noise rings) the vessel display doesn't draw. `-100` disables. Chosen by eye against screenshots on two clips (see `docs/calibration/README.md`) |
+| `--composite-range-m` | `0` | Ground-range radius in meters of the right-view composite window — the display's right-view `R:` setting, clip-specific (mind ft vs m). `0` derives the members' full data disk. Only used when the params JSON sets `compositeMode` |
+| `--composite-vessel-x` / `--composite-vessel-y` | `0.5` | Fractional position of the vessel in the composite window — the display's off-center mode, clip-specific (see `docs/calibration/README.md` for how to measure). `0.5` = centered |
 
 ### 4. Detect (Path A)
 
